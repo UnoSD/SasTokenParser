@@ -34,18 +34,22 @@ let private multilineStringToHtml (text : string) =
     text.Split('\n') |>
     Array.fold (fun acc line -> Html.text line :: Html.br [] :: acc) List.empty
 
-let private row (parameter : string) (readableValue : string option) (fieldName : string) (value : string option) =
-    match readableValue with
-    | None
-        -> Html.none
-    | Some readableValue
-        -> [
-               Html.tableCell [ Html.strong [ Html.text parameter ] ]
-               Html.tableCell [ Html.div [ yield! multilineStringToHtml readableValue ] ]
-               Html.tableCell [ Html.text fieldName ]
-               Html.tableCell [ Html.text (value |> Option.defaultValue "") ]
-           ] |>
-           Html.tableRow
+let private row (parameter : string) (readableValue : Result<string, string>) (fieldName : string) (value : Result<string, string>) =
+    [
+        Html.tableCell [ Html.strong [ Html.text parameter ] ]
+        Html.tableCell [ Html.div [
+            match readableValue with
+            | Ok readableValue -> yield! multilineStringToHtml readableValue
+            | Error error      -> Html.strong [ prop.style [ style.color.red ]; prop.children [ Html.text error ] ]
+        ] ]
+        Html.tableCell [ Html.text fieldName ]
+        Html.tableCell [
+            match value with
+            | Ok value    -> Html.text value
+            | Error error -> Html.strong [ prop.style [ style.color.red ]; prop.children [ Html.text error ] ]
+        ]
+    ] |>
+    Html.tableRow
 
 let private tryParseUrl url =
     try
@@ -79,8 +83,8 @@ let private getQueryStringMap (query : string) =
 
 let private getReadableDateTime (text : string) =
     match text.Replace("%3A", ":") |> DateTime.TryParse with
-    | true, value -> Some <| Date.Format.localFormat Date.Local.englishUK "dd MMM yyyy a\\t hh:mm:ss" value
-    | _           -> None
+    | true, value -> Ok <| Date.Format.localFormat Date.Local.englishUK "dd MMM yyyy a\\t hh:mm:ss" value
+    | _           -> Error <| sprintf "Unable to parse date %s" text
 
 let private (|UrlSegments|_|) (url : Uri) =
     match url.AbsolutePath.Length > 1, lazy(url.AbsolutePath.[1..].Split('/')) with
@@ -90,13 +94,13 @@ let private (|UrlSegments|_|) (url : Uri) =
 
 let private getBlobName (url : Uri) =
     match url with
-    | UrlSegments (_ :: _ :: _) & UrlSegments (_ :: xs) -> Some <| String.Join("/", xs)
-    | _                                                 -> None
+    | UrlSegments (_ :: _ :: _) & UrlSegments (_ :: xs) -> Ok <| String.Join("/", xs)
+    | _                                                 -> Error "Unable to parse blob name"
     
 let private getContainerName (url : Uri) =
     match url with
-    | UrlSegments (x :: _) -> Some x
-    | _                    -> None
+    | UrlSegments (x :: _) -> Ok x
+    | _                    -> Error "Unable to parse container name"
     
 let private getCloud domain =
     cloudMap |> Map.tryFind domain |> Option.defaultValue domain
@@ -107,52 +111,59 @@ let private getPermissionsExplanation permissions =
              | 'r' -> Some "r - Read"
              | 'w' -> Some "w - Write"
              | _   -> None) |>
-    fun x -> if Seq.forall Option.isSome x then String.Join("\n", x) |> Some else None
+    fun x -> if Seq.forall Option.isSome x then String.Join("\n", x) |> Ok else Error <| sprintf "Unable to parse %s" permissions
     
 let private getResourcesExplanation resource =
     match resource with
-    | "b"  -> Some "Blob"
-    | "bv" -> Some "Blob version"
-    | "bs" -> Some "Blob snapshot"
-    | "c"  -> Some "Container"
-    | "d"  -> Some "Directory"
-    | _    -> None
+    | "b"  -> Ok "Blob"
+    | "bv" -> Ok "Blob version"
+    | "bs" -> Ok "Blob snapshot"
+    | "c"  -> Ok "Container"
+    | "d"  -> Ok "Directory"
+    | rt   -> Error <| sprintf "Unrecognised resource type %s" rt
 
 let private getIpExplanation (ip : string) =
     match ip.Split('-') with
-    | [| ip |]           -> Some <| sprintf "Single IP: %s" ip
-    | [| fromIp; toIp |] -> Some <| sprintf "IP range from: %s to: %s" fromIp toIp
-    | _                  -> None
+    | [| ip |]           -> Ok <| sprintf "Single IP: %s" ip
+    | [| fromIp; toIp |] -> Ok <| sprintf "IP range from: %s to: %s" fromIp toIp
+    | _                  -> Error "Unable to parse IP or IP range"
+
+let private getProtocol =
+    function
+    | "http"       -> Ok "HTTP"
+    | "https"      -> Ok "HTTPS"
+    | "https,http" -> Ok "HTTP and HTTPS"
+    | x            -> Error <| sprintf "Unable to parse protocol %s" x
 
 let private parseHost (host : string) =
     let errorMessage = "Unsupported URL (custom domain or bad URL, add a nice error message)"
     
     match host.Split('.') with
-    | [| account; service; "core"; cloud; "net" |] -> {| Account = Some account; Service = Some service; Cloud = Some cloud |}
-    | _ ->                                            {| Account = Some errorMessage; Service = None; Cloud = None |}
+    | [| account; service; "core"; cloud; "net" |] -> {| Account = Ok account; Service = Ok service; Cloud = Ok cloud |}
+    | _ ->                                            {| Account = Error errorMessage; Service = Error ""; Cloud = Error "" |}
 
 let private parse url =
     tryParseUrl url |>
     Option.map (fun url -> (url, parseHost url.Host, getQueryStringMap url.Query.[1..])) |>
     Option.map (fun (url, hostInfo, query) ->
         let tryGetQueryStringValue key =
-            query |> Map.tryFind key |> Option.flatten
+            query |> Map.tryFind key |> Option.flatten |> Option.map Ok |> Option.defaultValue (Error "Missing")
         
         let tryGetQueryStringValueAndMap key func =
             match tryGetQueryStringValue key with
-            | Some value -> {| Value = Some value; Explanation = Some <| func value |}
-            | None       -> {| Value = None;       Explanation = None               |}
+            | Ok value -> {| Value = Ok value;     Explanation = Ok <| func value |}
+            | Error _  -> {| Value = Ok "Missing"; Explanation = Ok "Missing"     |}
         
         let tryGetQueryStringValueAndBind key func =
             match tryGetQueryStringValue key with
-            | Some value -> {| Value = Some value; Explanation = func value |}
-            | None       -> {| Value = None;       Explanation = None               |}
+            | Ok value -> {| Value = Ok value;     Explanation = func value   |}
+            | Error _  -> {| Value = Ok "Missing"; Explanation = Ok "Missing" |}
         
         {|
             Account       = hostInfo.Account
             Service       = hostInfo.Service
             Domain        = hostInfo.Cloud
-            Cloud         = hostInfo.Cloud |> Option.map getCloud
+            Cloud         = hostInfo.Cloud |> Result.map getCloud
             Container     = getContainerName url
             Blob          = getBlobName url
             Version       = tryGetQueryStringValueAndMap  "sv"  (sprintf "API version: %s")
@@ -161,18 +172,21 @@ let private parse url =
             Resource      = tryGetQueryStringValueAndBind "sr"  getResourcesExplanation
             Permissions   = tryGetQueryStringValueAndBind "sp"  getPermissionsExplanation
             IP            = tryGetQueryStringValueAndBind "sip" getIpExplanation
-            Protocol      = tryGetQueryStringValue        "spr"
+            Protocol      = tryGetQueryStringValueAndBind "spr" getProtocol
             Signature     = tryGetQueryStringValue        "sig"
         |})
 
 let private serviceSas =
-    Some "Service SAS"
+    Ok "Service SAS"
 
 let private hmacSignature =
-    Some "HMAC signature"
+    Ok "HMAC signature"
 
 let private yourUrl =
-    Some "Your URL"
+    Ok "Your URL"
+
+let private empty =
+    Ok ""
 
 let parserCard model dispatch =
     let urlField =
@@ -206,7 +220,7 @@ let parserCard model dispatch =
                 Html.tableBody [
                     yield! createSasRowsOrDefault (fun sas -> [
                         row "Type"              serviceSas                  "URL"                       yourUrl
-                        row "Account"           sas.Account                 "https://{account}.[...]"   sas.Account      
+                        row "Account"           sas.Account                 "https://{account}.[...]"   sas.Account
                         row "Service"           sas.Service                 "{account}.{service}.[...]" sas.Service      
                         row "Cloud"             sas.Cloud                   "core.{cloud}.net"          sas.Domain         
                         row "Container"         sas.Container               "/{container}/[...]"        sas.Container  
@@ -217,10 +231,10 @@ let parserCard model dispatch =
                         row "Resource"          sas.Resource.Explanation    "sr"                        sas.Resource.Value
                         row "Permissions"       sas.Permissions.Explanation "sp"                        sas.Permissions.Value
                         row "Allowed IP"        sas.IP.Explanation          "ip"                        sas.IP.Value
-                        row "Protocol"          sas.Protocol                "spr"                       sas.Protocol   
+                        row "Protocol"          sas.Protocol.Explanation    "spr"                       sas.Protocol.Value  
                         row "Signature"         hmacSignature               "sig"                       sas.Signature  
                     ])
-                      [ row "Invalid SAS token" None                        ""                          None ]
+                      [ row "Invalid SAS token" empty                       ""                          empty ]
                 ]
             ]
         ]
