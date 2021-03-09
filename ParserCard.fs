@@ -131,6 +131,12 @@ let private getServicesExplanation services =
       'f', "f - File"  ] |>
     getExplanationForCharacters services
     
+let private getResourceTypesExplanation services =
+    [ 's', "s - Service"
+      'c', "c - Container/queue/table/share"
+      'o', "o - Blob/message/entity/file" ] |>
+    getExplanationForCharacters services
+    
 let private getResourcesExplanation resource =
     match resource with
     | "b"  -> Ok "Blob"
@@ -201,6 +207,7 @@ let private parse url =
             Permissions   = tryGetQueryStringValueAndBind "sp"  getPermissionsExplanation
             IP            = tryGetQueryStringValueAndBind "sip" getIpExplanation
             Protocol      = tryGetQueryStringValueAndBind "spr" getProtocol
+            Types         = tryGetQueryStringValueAndBind "srt" getResourceTypesExplanation
             Signature     = tryGetQueryStringValue        "sig"
         |} |> sasType)
 
@@ -274,6 +281,7 @@ let parserCard model dispatch =
                                 row "Cloud"             sas.Cloud                   "core.{cloud}.net"   sas.Domain         
                                 row "Version"           sas.Version.Explanation     "sv"                 sas.Version.Value
                                 row "Services"          sas.Services.Explanation    "ss"                 sas.Services.Value
+                                row "Types"             sas.Types.Explanation       "srt"                sas.Types.Value
                                 row "Start time"        sas.Start.Explanation       "st"                 sas.Start.Value
                                 row "Expiry time"       sas.Expiry.Explanation      "se"                 sas.Expiry.Value
                                 row "Resource"          sas.Resource.Explanation    "sr"                 sas.Resource.Value
