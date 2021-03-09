@@ -105,23 +105,24 @@ let private getContainerName (url : Uri) =
 let private getCloud domain =
     cloudMap |> Map.tryFind domain |> Option.defaultValue domain
     
+let private getExplanationForCharacters value map =
+    value |>
+    Seq.map (fun c -> Map.ofList map |> Map.tryFind c) |>
+    fun x -> if   Seq.forall Option.isSome x
+             then Ok    <| String.Join("\n", x)
+             else Error <| sprintf "Unable to parse %s" value
+    
 let private getPermissionsExplanation permissions =
-    permissions |>
-    Seq.map (function
-             | 'r' -> Some "r - Read"
-             | 'w' -> Some "w - Write"
-             | _   -> None) |>
-    fun x -> if Seq.forall Option.isSome x then String.Join("\n", x) |> Ok else Error <| sprintf "Unable to parse %s" permissions
+    [ 'r', "r - Read"
+      'w', "w - Write" ] |>
+    getExplanationForCharacters permissions
     
 let private getServicesExplanation services =
-    services |>
-    Seq.map (function
-             | 'b' -> Some "b - Blob"
-             | 'q' -> Some "q - Queue"
-             | 't' -> Some "t - Table"
-             | 'f' -> Some "f - File"
-             | _   -> None) |>
-    fun x -> if Seq.forall Option.isSome x then String.Join("\n", x) |> Ok else Error <| sprintf "Unable to parse %s" services
+    [ 'b', "b - Blob"
+      'q', "q - Queue"
+      't', "t - Table"
+      'f', "f - File"  ] |>
+    getExplanationForCharacters services
     
 let private getResourcesExplanation resource =
     match resource with
