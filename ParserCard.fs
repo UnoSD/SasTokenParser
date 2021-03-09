@@ -113,6 +113,16 @@ let private getPermissionsExplanation permissions =
              | _   -> None) |>
     fun x -> if Seq.forall Option.isSome x then String.Join("\n", x) |> Ok else Error <| sprintf "Unable to parse %s" permissions
     
+let private getServicesExplanation services =
+    services |>
+    Seq.map (function
+             | 'b' -> Some "b - Blob"
+             | 'q' -> Some "q - Queue"
+             | 't' -> Some "t - Table"
+             | 'f' -> Some "f - File"
+             | _   -> None) |>
+    fun x -> if Seq.forall Option.isSome x then String.Join("\n", x) |> Ok else Error <| sprintf "Unable to parse %s" services
+    
 let private getResourcesExplanation resource =
     match resource with
     | "b"  -> Ok "Blob"
@@ -142,6 +152,8 @@ let private parseHost (host : string) =
     | [| account; service; "core"; cloud; "net" |] -> {| Account = Ok account; Service = Ok service; Cloud = Ok cloud |}
     | _ ->                                            {| Account = Error errorMessage; Service = Error ""; Cloud = Error "" |}
 
+type private SasType<'a> = | Account of 'a | Service of 'a
+
 let private parse url =
     tryParseUrl url |>
     Option.map (fun url -> (url, parseHost url.Host, getQueryStringMap url.Query.[1..])) |>
@@ -159,6 +171,13 @@ let private parse url =
             | Ok value -> {| Value = Ok value;     Explanation = func value   |}
             | Error _  -> {| Value = Ok "Missing"; Explanation = Ok "Missing" |}
         
+        let blobName = getBlobName url
+        let containerName = getContainerName url
+        let sasType =
+            match containerName, blobName with
+            | Error _, Error _ -> Account
+            | _                -> Service
+        
         {|
             Account       = hostInfo.Account
             Service       = hostInfo.Service
@@ -167,6 +186,7 @@ let private parse url =
             Container     = getContainerName url
             Blob          = getBlobName url
             Version       = tryGetQueryStringValueAndMap  "sv"  (sprintf "API version: %s")
+            Services      = tryGetQueryStringValueAndBind "ss"  getServicesExplanation
             Start         = tryGetQueryStringValueAndBind "st"  getReadableDateTime
             Expiry        = tryGetQueryStringValueAndBind "se"  getReadableDateTime
             Resource      = tryGetQueryStringValueAndBind "sr"  getResourcesExplanation
@@ -174,10 +194,13 @@ let private parse url =
             IP            = tryGetQueryStringValueAndBind "sip" getIpExplanation
             Protocol      = tryGetQueryStringValueAndBind "spr" getProtocol
             Signature     = tryGetQueryStringValue        "sig"
-        |})
+        |} |> sasType)
 
 let private serviceSas =
     Ok "Service SAS"
+    
+let private accountSas =
+    Ok "Account SAS"
 
 let private hmacSignature =
     Ok "HMAC signature"
@@ -218,23 +241,40 @@ let parserCard model dispatch =
                     th "Value"
                 ]
                 Html.tableBody [
-                    yield! createSasRowsOrDefault (fun sas -> [
-                        row "Type"              serviceSas                  "URL"                       yourUrl
-                        row "Account"           sas.Account                 "https://{account}.[...]"   sas.Account
-                        row "Service"           sas.Service                 "{account}.{service}.[...]" sas.Service      
-                        row "Cloud"             sas.Cloud                   "core.{cloud}.net"          sas.Domain         
-                        row "Container"         sas.Container               "/{container}/[...]"        sas.Container  
-                        row "Blob"              sas.Blob                    "{container}/{blob}"        sas.Blob            
-                        row "Version"           sas.Version.Explanation     "sv"                        sas.Version.Value
-                        row "Start time"        sas.Start.Explanation       "st"                        sas.Start.Value
-                        row "Expiry time"       sas.Expiry.Explanation      "se"                        sas.Expiry.Value
-                        row "Resource"          sas.Resource.Explanation    "sr"                        sas.Resource.Value
-                        row "Permissions"       sas.Permissions.Explanation "sp"                        sas.Permissions.Value
-                        row "Allowed IP"        sas.IP.Explanation          "ip"                        sas.IP.Value
-                        row "Protocol"          sas.Protocol.Explanation    "spr"                       sas.Protocol.Value  
-                        row "Signature"         hmacSignature               "sig"                       sas.Signature  
-                    ])
-                      [ row "Invalid SAS token" empty                       ""                          empty ]
+                    yield! createSasRowsOrDefault (function
+                        | Service sas ->
+                            [
+                                row "Type"              serviceSas                  "URL"                yourUrl
+                                row "Account"           sas.Account                 "//{account}."       sas.Account
+                                row "Service"           sas.Service                 ".{service}.core"    sas.Service      
+                                row "Cloud"             sas.Cloud                   "core.{cloud}.net"   sas.Domain         
+                                row "Container"         sas.Container               ".net/{container}/"  sas.Container  
+                                row "Blob"              sas.Blob                    "{container}/{blob}" sas.Blob            
+                                row "Version"           sas.Version.Explanation     "sv"                 sas.Version.Value
+                                row "Start time"        sas.Start.Explanation       "st"                 sas.Start.Value
+                                row "Expiry time"       sas.Expiry.Explanation      "se"                 sas.Expiry.Value
+                                row "Resource"          sas.Resource.Explanation    "sr"                 sas.Resource.Value
+                                row "Permissions"       sas.Permissions.Explanation "sp"                 sas.Permissions.Value
+                                row "Allowed IP"        sas.IP.Explanation          "ip"                 sas.IP.Value
+                                row "Protocol"          sas.Protocol.Explanation    "spr"                sas.Protocol.Value  
+                                row "Signature"         hmacSignature               "sig"                sas.Signature
+                            ]
+                        | Account sas -> [
+                                row "Type"              accountSas                  "URL"                yourUrl
+                                row "Account"           sas.Account                 "//{account}."       sas.Account
+                                row "Service"           sas.Service                 ".{service}.core"    sas.Service      
+                                row "Cloud"             sas.Cloud                   "core.{cloud}.net"   sas.Domain         
+                                row "Version"           sas.Version.Explanation     "sv"                 sas.Version.Value
+                                row "Services"          sas.Services.Explanation    "ss"                 sas.Services.Value
+                                row "Start time"        sas.Start.Explanation       "st"                 sas.Start.Value
+                                row "Expiry time"       sas.Expiry.Explanation      "se"                 sas.Expiry.Value
+                                row "Resource"          sas.Resource.Explanation    "sr"                 sas.Resource.Value
+                                row "Permissions"       sas.Permissions.Explanation "sp"                 sas.Permissions.Value
+                                row "Allowed IP"        sas.IP.Explanation          "ip"                 sas.IP.Value
+                                row "Protocol"          sas.Protocol.Explanation    "spr"                sas.Protocol.Value  
+                                row "Signature"         hmacSignature               "sig"                sas.Signature
+                        ])
+                      [ row "Invalid SAS token" empty                       ""                   empty ]
                 ]
             ]
         ]
