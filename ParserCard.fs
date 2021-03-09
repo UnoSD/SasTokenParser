@@ -106,11 +106,14 @@ let private getCloud domain =
     cloudMap |> Map.tryFind domain |> Option.defaultValue domain
     
 let private getExplanationForCharacters value map =
-    value |>
-    Seq.map (fun c -> Map.ofList map |> Map.tryFind c) |>
-    fun x -> if   Seq.forall Option.isSome x
-             then Ok    <| String.Join("\n", x)
-             else Error <| sprintf "Unable to parse %s" value
+    match value with
+    | "" | null -> Error "Empty value"
+    | _ ->
+        value |>
+        Seq.map (fun c -> Map.ofList map |> Map.tryFind c) |>
+        fun x -> if   Seq.forall Option.isSome x
+                 then Ok    <| String.Join("\n", x)
+                 else Error <| sprintf "Unable to parse %s" value
     
 let private getPermissionsExplanation permissions =
     [ 'r', "r - Read"
@@ -166,49 +169,170 @@ let private parseHost (host : string) =
     | [| account; service; "core"; cloud; "net" |] -> {| Account = Ok account; Service = Ok service; Cloud = Ok cloud |}
     | _ ->                                            {| Account = Error errorMessage; Service = Error ""; Cloud = Error "" |}
 
-type private SasType<'a> = | Account of 'a | Service of 'a
+type private SasType<'a> = | Account of 'a | Service of 'a | User of 'a | Invalid of 'a
 
 let private parse url =
     tryParseUrl url |>
     Option.map (fun url -> (url, parseHost url.Host, getQueryStringMap url.Query.[1..])) |>
     Option.map (fun (url, hostInfo, query) ->
-        let tryGetQueryStringValue key =
-            query |> Map.tryFind key |> Option.flatten |> Option.map Ok |> Option.defaultValue (Error "Missing")
-        
-        let tryGetQueryStringValueAndMap key func =
-            match tryGetQueryStringValue key with
-            | Ok value -> {| Value = Ok value;     Explanation = Ok <| func value |}
-            | Error _  -> {| Value = Ok "Missing"; Explanation = Ok "Missing"     |}
+        let tryGetNonEmptyQueryStringValue key =
+            query |>
+            Map.tryFind key |>
+            Option.flatten
         
         let tryGetQueryStringValueAndBind key func =
-            match tryGetQueryStringValue key with
-            | Ok value -> {| Value = Ok value;     Explanation = func value   |}
-            | Error _  -> {| Value = Ok "Missing"; Explanation = Ok "Missing" |}
+            tryGetNonEmptyQueryStringValue key |>
+            Option.map (fun value -> {| Source = value; Parsed = func value |})
         
-        let blobName = getBlobName url
-        let containerName = getContainerName url
+        let (*valuesMap*)_ =
+            [ "sv"   , (sprintf "API version: %s" >> Ok)
+              "sp"   , getPermissionsExplanation
+              "se"   , getReadableDateTime
+              "ss"   , getServicesExplanation
+              "srt"  , getResourceTypesExplanation
+              "sr"   , getResourcesExplanation
+              "skoid", Ok
+              "sktid", Ok
+              "ske"  , Ok
+              "sks"  , Ok
+              "sdd"  , Ok
+              "tn"   , Ok
+              "sig"  , Ok ] |>
+            List.map (fun (key, parser) -> key, tryGetQueryStringValueAndBind key parser) |>
+            Map.ofList
+        
+        let signedVersion =
+            tryGetQueryStringValueAndBind "sv"    (sprintf "API version: %s" >> Ok)
+        
+        let signedPermissions =
+            tryGetQueryStringValueAndBind "sp"    getPermissionsExplanation
+        
+        let signedExpiry =
+            tryGetQueryStringValueAndBind "se"    getReadableDateTime
+        
+        let signedServices =
+            tryGetQueryStringValueAndBind "ss"    getServicesExplanation
+                                                  
+        let signedResourceTypes =                 
+            tryGetQueryStringValueAndBind "srt"   getResourceTypesExplanation
+                                                  
+        let signedResource =                      
+            tryGetQueryStringValueAndBind "sr"    getResourcesExplanation
+        
+        let signedObjectId =
+            tryGetQueryStringValueAndBind "skoid" Ok
+
+        let signedTenantId =
+            tryGetQueryStringValueAndBind "sktid" Ok
+                
+        let signedKeyExpiryTime =
+            tryGetQueryStringValueAndBind "ske"   Ok
+            
+        let signedKeyService =
+            tryGetQueryStringValueAndBind "sks"   Ok
+
+        let signedDirectoryDepth =
+            tryGetQueryStringValueAndBind "sdd"   Ok
+        
+        let tableName =
+            tryGetQueryStringValueAndBind "tn"    Ok
+        
+        let signature =
+            tryGetNonEmptyQueryStringValue "sig"  |> Option.map Ok |> Option.defaultValue (Error "")
+        
+        let serviceDependantRequiredKeyForServiceSas =
+            match hostInfo.Service with
+            | Ok "blob"
+            | Ok "file"  -> signedResource |> Option.map (fun x -> x.Parsed) |> Option.defaultValue (Error "Missing signed resource")
+            | Ok "table" -> tableName      |> Option.map (fun x -> x.Parsed) |> Option.defaultValue (Error "Missing table name")
+            | _          -> Ok ""
+        
+        let (|Parsed|_|) (record : {| Parsed : Result<string, string>; Source : string |}) =
+            match record.Parsed with
+            | Ok x -> Some x
+            | _    -> None
+        
+        let isSignedDirectoryDepthRequired =
+            match signedResource with
+            | Some (Parsed x) when x = "d" -> true
+            | _                            -> false
+        
+        let isSignedDirectoryDepthPresent =
+            match signedDirectoryDepth with
+            | Some (Parsed _) -> true
+            | _               -> false
+        
+        let isOk =
+            function
+            | Ok _    -> true
+            | Error _ -> false
+        
+        let containerName =
+            getContainerName url
+        
+        // account: https://myaccount.blob.core.windows.net/?restype=service&comp=properties&sv=2019-02-02&ss=bf&srt=s&st=2019-08-01T22%3A18%3A26Z&se=2019-08-10T02%3A23%3A26Z&sr=b&sp=rw&sip=168.1.5.60-168.1.5.70&spr=https&sig=F%6GRVAZ5Cdj2Pw4tgU7IlSTkWgn7bUkkAg8P6HESXwmf%4B
+        // service: https://myaccount.blob.core.windows.net/sascontainer/sasblob.txt?sv=2019-02-02&st=2019-04-29T22%3A18%3A26Z&se=2019-04-30T02%3A23%3A26Z&sr=b&sp=rw&sip=168.1.5.60-168.1.5.70&spr=https&sig=Z%2FRHIX5Xcg0Mq2rqI3OlWTjEg2tYkboXr1P9ZUXDtkk%3D
+        // user   : https://myaccount.blob.core.windows.net/sascontainer/sasblob.txt?se=2021-03-10&sp=racwdl&sv=2018-11-09&sr=c&skoid=00000000-0000-0000-0000-000000000000&sktid=00000000-0000-0000-0000-000000000000&skt=2021-03-09T20%3A18%3A58Z&ske=2021-03-10T00%3A00%3A00Z&sks=b&skv=2018-11-09&sig=FiBaLiCorDnuS18d0000bmSLehDyG0uBT1111bmazoI%3D
+        
+        // required for account    sas: [sv se sig sp] srt ss
+        // required for delegation sas: [sv se sig sp] sr skoid sktid ske sks sdd (when sr=d)
+        // required for service    sas: [sv se sig sp] sr (only blob/file) tn (only table) sdd (when sr=d)
+        
+        let isAccountSas =
+            [ signedResourceTypes
+              signedServices      ] |>
+            List.forall (function | Some (Parsed _) -> true | _ -> false) &&
+            not <| isOk containerName
+        
+        let isUserSas =
+            [ signedResource
+              signedObjectId
+              signedTenantId
+              signedKeyExpiryTime
+              signedKeyService    ] |>
+            List.forall (function | Some (Parsed _) -> true | _ -> false) &&
+            (isSignedDirectoryDepthRequired = isSignedDirectoryDepthPresent)
+        
+        let isServiceSas =
+            [ serviceDependantRequiredKeyForServiceSas ] |>
+            List.forall (function | Ok _ -> true | _ -> false) &&
+            (isSignedDirectoryDepthRequired = isSignedDirectoryDepthPresent) &&
+            (not <| isOk (signedResourceTypes |> Option.map (fun x -> x.Parsed) |> Option.defaultValue(Error ""))) &&
+            (not <| isOk (signedObjectId |> Option.map (fun x -> x.Parsed) |> Option.defaultValue(Error "")))
+        
+        let isValidSas =
+            [ signedVersion
+              signedExpiry
+              signedPermissions ] |>
+            List.forall (function | Some (Parsed _) -> true | _ -> false) &&
+            (match signature with | Ok _ -> true | _ -> false)
+        
         let sasType =
-            match containerName, blobName with
-            | Error _, Error _ -> Account
-            | _                -> Service
+            match isValidSas, isAccountSas, isUserSas, isServiceSas with
+            | true, true, false, false -> Account
+            | true, false, false, true -> Service
+            | true, false, true, false -> User
+            | _                        -> Invalid
+        
+        printfn "Is valid sas %A" (isValidSas, isAccountSas, isUserSas, isServiceSas)
         
         {|
             Account       = hostInfo.Account
             Service       = hostInfo.Service
             Domain        = hostInfo.Cloud
             Cloud         = hostInfo.Cloud |> Result.map getCloud
-            Container     = getContainerName url
+            Container     = containerName
             Blob          = getBlobName url
-            Version       = tryGetQueryStringValueAndMap  "sv"  (sprintf "API version: %s")
-            Services      = tryGetQueryStringValueAndBind "ss"  getServicesExplanation
-            Start         = tryGetQueryStringValueAndBind "st"  getReadableDateTime
-            Expiry        = tryGetQueryStringValueAndBind "se"  getReadableDateTime
-            Resource      = tryGetQueryStringValueAndBind "sr"  getResourcesExplanation
-            Permissions   = tryGetQueryStringValueAndBind "sp"  getPermissionsExplanation
-            IP            = tryGetQueryStringValueAndBind "sip" getIpExplanation
-            Protocol      = tryGetQueryStringValueAndBind "spr" getProtocol
-            Types         = tryGetQueryStringValueAndBind "srt" getResourceTypesExplanation
-            Signature     = tryGetQueryStringValue        "sig"
+            Version       = signedVersion                                           |> Option.defaultValue ({| Parsed = Ok "Missing"; Source = "" |})
+            Services      = signedServices                                          |> Option.defaultValue ({| Parsed = Ok "Missing"; Source = "" |})
+            Start         = tryGetQueryStringValueAndBind "st"  getReadableDateTime |> Option.defaultValue ({| Parsed = Ok "Missing"; Source = "" |})
+            Expiry        = signedExpiry                                            |> Option.defaultValue ({| Parsed = Ok "Missing"; Source = "" |})
+            Resource      = signedResource                                          |> Option.defaultValue ({| Parsed = Ok "Missing"; Source = "" |})
+            Permissions   = signedPermissions                                       |> Option.defaultValue ({| Parsed = Ok "Missing"; Source = "" |})
+            IP            = tryGetQueryStringValueAndBind "sip" getIpExplanation    |> Option.defaultValue ({| Parsed = Ok "Missing"; Source = "" |})
+            Protocol      = tryGetQueryStringValueAndBind "spr" getProtocol         |> Option.defaultValue ({| Parsed = Ok "Missing"; Source = "" |})
+            Types         = signedResourceTypes                                     |> Option.defaultValue ({| Parsed = Ok "Missing"; Source = "" |})
+            Signature     = signature
         |} |> sasType)
 
 let private serviceSas =
@@ -216,6 +340,9 @@ let private serviceSas =
     
 let private accountSas =
     Ok "Account SAS"
+    
+let private userSas =
+    Ok "User delegation SAS"
 
 let private hmacSignature =
     Ok "HMAC signature"
@@ -257,40 +384,75 @@ let parserCard model dispatch =
                 ]
                 Html.tableBody [
                     yield! createSasRowsOrDefault (function
-                        | Service sas ->
-                            [
-                                row "Type"              serviceSas                  "URL"                yourUrl
-                                row "Account"           sas.Account                 "//{account}."       sas.Account
-                                row "Service"           sas.Service                 ".{service}.core"    sas.Service      
-                                row "Cloud"             sas.Cloud                   "core.{cloud}.net"   sas.Domain         
-                                row "Container"         sas.Container               ".net/{container}/"  sas.Container  
-                                row "Blob"              sas.Blob                    "{container}/{blob}" sas.Blob            
-                                row "Version"           sas.Version.Explanation     "sv"                 sas.Version.Value
-                                row "Start time"        sas.Start.Explanation       "st"                 sas.Start.Value
-                                row "Expiry time"       sas.Expiry.Explanation      "se"                 sas.Expiry.Value
-                                row "Resource"          sas.Resource.Explanation    "sr"                 sas.Resource.Value
-                                row "Permissions"       sas.Permissions.Explanation "sp"                 sas.Permissions.Value
-                                row "Allowed IP"        sas.IP.Explanation          "ip"                 sas.IP.Value
-                                row "Protocol"          sas.Protocol.Explanation    "spr"                sas.Protocol.Value  
-                                row "Signature"         hmacSignature               "sig"                sas.Signature
+                        | Service sas -> [
+                                row "Type"               serviceSas             "URL"                yourUrl
+                                row "Account"            sas.Account            "//{account}."       sas.Account
+                                row "Service"            sas.Service            ".{service}.core"    sas.Service      
+                                row "Cloud"              sas.Cloud              "core.{cloud}.net"   sas.Domain         
+                                row "Container"          sas.Container          ".net/{container}/"  sas.Container  
+                                row "Blob"               sas.Blob               "{container}/{blob}" sas.Blob            
+                                row "Version"            sas.Version.Parsed     "sv"                 (sas.Version.Source     |> Ok)
+                                row "Start time"         sas.Start.Parsed       "st"                 (sas.Start.Source       |> Ok)
+                                row "Expiry time"        sas.Expiry.Parsed      "se"                 (sas.Expiry.Source      |> Ok)
+                                row "Resource"           sas.Resource.Parsed    "sr"                 (sas.Resource.Source    |> Ok)
+                              //row "Table name"         sas.Resource.Parsed    "tn"                 (sas.Resource.Source    |> Ok)
+                              //row "From partition key" sas.Resource.Parsed    "spk"                (sas.Resource.Source    |> Ok)
+                              //row "From row key"       sas.Resource.Parsed    "srk"                (sas.Resource.Source    |> Ok)
+                              //row "To partition key"   sas.Resource.Parsed    "epk"                (sas.Resource.Source    |> Ok)
+                              //row "To row key"         sas.Resource.Parsed    "erk"                (sas.Resource.Source    |> Ok)
+                                row "Permissions"        sas.Permissions.Parsed "sp"                 (sas.Permissions.Source |> Ok)
+                                row "Allowed IP"         sas.IP.Parsed          "sip"                (sas.IP.Source          |> Ok)
+                              //row "Policy"             sas.Resource.Parsed    "si"                 (sas.Resource.Source    |> Ok)
+                                row "Protocol"           sas.Protocol.Parsed    "spr"                (sas.Protocol.Source    |> Ok)
+                                row "Signature"          hmacSignature          "sig"                sas.Signature
                             ]
                         | Account sas -> [
-                                row "Type"              accountSas                  "URL"                yourUrl
-                                row "Account"           sas.Account                 "//{account}."       sas.Account
-                                row "Service"           sas.Service                 ".{service}.core"    sas.Service      
-                                row "Cloud"             sas.Cloud                   "core.{cloud}.net"   sas.Domain         
-                                row "Version"           sas.Version.Explanation     "sv"                 sas.Version.Value
-                                row "Services"          sas.Services.Explanation    "ss"                 sas.Services.Value
-                                row "Types"             sas.Types.Explanation       "srt"                sas.Types.Value
-                                row "Start time"        sas.Start.Explanation       "st"                 sas.Start.Value
-                                row "Expiry time"       sas.Expiry.Explanation      "se"                 sas.Expiry.Value
-                                row "Resource"          sas.Resource.Explanation    "sr"                 sas.Resource.Value
-                                row "Permissions"       sas.Permissions.Explanation "sp"                 sas.Permissions.Value
-                                row "Allowed IP"        sas.IP.Explanation          "ip"                 sas.IP.Value
-                                row "Protocol"          sas.Protocol.Explanation    "spr"                sas.Protocol.Value  
-                                row "Signature"         hmacSignature               "sig"                sas.Signature
-                        ])
-                      [ row "Invalid SAS token" empty                       ""                   empty ]
+                                row "Type"        accountSas             "URL"              yourUrl
+                                row "Account"     sas.Account            "//{account}."     sas.Account
+                                row "Service"     sas.Service            ".{service}.core"  sas.Service
+                                row "Cloud"       sas.Cloud              "core.{cloud}.net" sas.Domain
+                                row "Version"     sas.Version.Parsed     "sv"               (sas.Version.Source     |> Ok)
+                                row "Services"    sas.Services.Parsed    "ss"               (sas.Services.Source    |> Ok)
+                                row "Types"       sas.Types.Parsed       "srt"              (sas.Types.Source       |> Ok)
+                                row "Permissions" sas.Permissions.Parsed "sp"               (sas.Permissions.Source |> Ok)
+                                row "Start time"  sas.Start.Parsed       "st"               (sas.Start.Source       |> Ok)
+                                row "Expiry time" sas.Expiry.Parsed      "se"               (sas.Expiry.Source      |> Ok)
+                                row "Allowed IP"  sas.IP.Parsed          "sip"              (sas.IP.Source          |> Ok)
+                                row "Protocol"    sas.Protocol.Parsed    "spr"              (sas.Protocol.Source    |> Ok)
+                                row "Signature"   hmacSignature          "sig"              sas.Signature
+                            ]
+                        | User sas -> [
+                                row "Type"                 userSas                "URL"                yourUrl
+                                row "Account"              sas.Account            "//{account}."       sas.Account
+                                row "Service"              sas.Service            ".{service}.core"    sas.Service      
+                                row "Cloud"                sas.Cloud              "core.{cloud}.net"   sas.Domain         
+                                row "Version"              sas.Version.Parsed     "sv"                 (sas.Version.Source     |> Ok)
+                                row "Resource"             sas.Resource.Parsed    "sr"                 (sas.Resource.Source    |> Ok)
+                                row "Start time"           sas.Start.Parsed       "st"                 (sas.Start.Source       |> Ok)
+                                row "Expiry time"          sas.Expiry.Parsed      "se"                 (sas.Expiry.Source      |> Ok)
+                                row "Permissions"          sas.Permissions.Parsed "sp"                 (sas.Permissions.Source |> Ok)
+                                row "Allowed IP"           sas.IP.Parsed          "sip"                (sas.IP.Source          |> Ok)
+                                row "Protocol"             sas.Protocol.Parsed    "spr"                (sas.Protocol.Source    |> Ok)
+                              //row "Object ID"            sas.Resource.Parsed    "skoid"              (sas.Resource.Source    |> Ok)  
+                              //row "Tenand ID"            sas.Resource.Parsed    "sktid"              (sas.Resource.Source    |> Ok)  
+                              //row "Key start time"       sas.Resource.Parsed    "skt"                (sas.Resource.Source    |> Ok)  
+                              //row "Key expiry time"      sas.Resource.Parsed    "ske"                (sas.Resource.Source    |> Ok)  
+                              //row "Key service"          sas.Resource.Parsed    "sks"                (sas.Resource.Source    |> Ok)  
+                              //row "AuthorizedObjectId"   sas.Resource.Parsed    "saoid"              (sas.Resource.Source    |> Ok)  
+                              //row "UnauthorizedObjectId" sas.Resource.Parsed    "suoid"              (sas.Resource.Source    |> Ok)  
+                              //row "Correlation ID"       sas.Resource.Parsed    "scid"               (sas.Resource.Source    |> Ok)  
+                              //row "Directory depth"      sas.Resource.Parsed    "sdd"                (sas.Resource.Source    |> Ok)  
+                              //row "Cache-Control"        sas.Resource.Parsed    "rscc"               (sas.Resource.Source    |> Ok)  
+                              //row "Content-Disposition"  sas.Resource.Parsed    "rscd"               (sas.Resource.Source    |> Ok)  
+                              //row "Content-Encoding"     sas.Resource.Parsed    "rsce"               (sas.Resource.Source    |> Ok)  
+                              //row "Content-Language"     sas.Resource.Parsed    "rscl"               (sas.Resource.Source    |> Ok)  
+                              //row "Content-Type"         sas.Resource.Parsed    "rsct"               (sas.Resource.Source    |> Ok)  
+                                row "Signature"            hmacSignature          "sig"                sas.Signature
+                            ]
+                        | Invalid _ -> [
+                                row "Invalid SAS token"    empty                  ""                   empty
+                            ])                            
+                      [         row "Invalid SAS token"    empty                  ""                   empty ]
                 ]
             ]
         ]
