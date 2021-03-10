@@ -311,53 +311,36 @@ let private parse url =
             | true, false, true , false -> "sr skoid sktid ske sks sdd" , Ok "User delegation SAS"
             | _                         -> ""                           , Error "Invalid SAS token"                   
                 
-        let getResult map =
-            hostInfo |>
-            Option.map (map >> Ok) |>
-            Option.defaultValue (Error "Invalid URL") 
-        
-        let account =
-            getResult (fun x -> x.Account)
-        
-        let service =
-            getResult (fun x -> x.Service)
-        
-        let domain =
-            hostInfo |> Option.map (fun x -> x.Domain)
-        
-        let createResultRowInfo parsed source =
-            Some {| Parsed = parsed; Source = source |}
-        
-        let createResultRowInfoNoSource parsed =
-            match parsed with
-            | Ok value -> createResultRowInfo parsed value
-            | Error _  -> None
-        
         let createOptionRowInfo parse opt =
             Option.map (fun x -> {| Parsed = parse x; Source = x |}) opt
+        
+        let createRowInfoFromHostInfo parse map =
+            hostInfo |>
+            Option.map map |>
+            createOptionRowInfo parse
         
         [
             {|
                 Parameter     = "Type"
-                Value         = createResultRowInfo sasType uniqueQsKeys
+                Value         = Some {| Parsed = sasType; Source = uniqueQsKeys |}
                 FieldName     = "URL and QS"
             |}
             
             {|
                 Parameter     = "Account"
-                Value         = createResultRowInfoNoSource account
+                Value         = createRowInfoFromHostInfo Ok (fun x -> x.Account)
                 FieldName     = "//{account}."
             |}
             
             {|
                 Parameter     = "Service"
-                Value         = createResultRowInfoNoSource service
+                Value         = createRowInfoFromHostInfo Ok (fun x -> x.Service)
                 FieldName     = ".{service}.core"
             |}
             
             {|
                 Parameter     = "Cloud"
-                Value         = createOptionRowInfo getCloudResult domain
+                Value         = createRowInfoFromHostInfo getCloudResult (fun x -> x.Domain)
                 FieldName     = "core.{cloud}.net"
             |}
             
