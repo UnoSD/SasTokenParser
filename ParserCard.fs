@@ -196,27 +196,27 @@ let private parse url =
             Option.map (fun value -> {| Source = value; Parsed = func value |})
         
         let qsValueMap =
-            [ "sv"   , (sprintf "API version: %s" >> Ok)
-              "sp"   , getPermissionsExplanation
-              "se"   , getReadableDateTime
-              "ss"   , getServicesExplanation
-              "srt"  , getResourceTypesExplanation
-              "sr"   , getResourcesExplanation
-              "skoid", Ok
-              "sktid", Ok
-              "ske"  , Ok
-              "sks"  , Ok
-              "sdd"  , Ok
-              "tn"   , Ok
-              "sig"  , (fun _ -> Ok "HMAC signature") ] |>
+            [ signedVersion   , (sprintf "API version: %s" >> Ok)
+              signedPermissions   , getPermissionsExplanation
+              signedExpiry   , getReadableDateTime
+              signedServices   , getServicesExplanation
+              signedResourceTypes  , getResourceTypesExplanation
+              signedResource   , getResourcesExplanation
+              signedObjectId, Ok
+              signedTenantId, Ok
+              signedKeyExpiryTime  , Ok
+              signedKeyService  , Ok
+              signedDirectoryDepth  , Ok
+              tableName   , Ok
+              signature  , (fun _ -> Ok "HMAC signature") ] |>
             List.map (fun (key, parser) -> key, tryGetQueryStringValueAndBind key parser) |>
             Map.ofList
                       
         let serviceDependantRequiredKeyForServiceSas =
             match hostInfo |> Option.map (fun x -> x.Service) with
             | Some "blob"
-            | Some "file"  -> qsValueMap.["sr"] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue (Error "Missing signed resource")
-            | Some "table" -> qsValueMap.["tn"] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue (Error "Missing table name")
+            | Some "file"  -> qsValueMap.[signedResource] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue (Error "Missing signed resource")
+            | Some "table" -> qsValueMap.[tableName] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue (Error "Missing table name")
             | _            -> Ok ""
         
         let (|Parsed|_|) (record : {| Parsed : Result<string, string>; Source : string |}) =
@@ -225,12 +225,12 @@ let private parse url =
             | _    -> None
         
         let isSignedDirectoryDepthRequired =
-            match qsValueMap.["sr"] with
+            match qsValueMap.[signedResource] with
             | Some (Parsed x) when x = "d" -> true
             | _                            -> false
         
         let isSignedDirectoryDepthPresent =
-            match qsValueMap.["sdd"] with
+            match qsValueMap.[signedDirectoryDepth] with
             | Some (Parsed _) -> true
             | _               -> false
         
@@ -251,17 +251,17 @@ let private parse url =
         // required for service    sas: [sv se sig sp] sr (only blob/file) tn (only table) sdd (when sr=d)
         
         let isAccountSas =
-            [ qsValueMap.["srt"]
-              qsValueMap.["ss"]   ] |>
+            [ qsValueMap.[signedResourceTypes]
+              qsValueMap.[signedServices]   ] |>
             List.forall (function | Some (Parsed _) -> true | _ -> false) &&
             not <| Option.isSome containerName
         
         let isUserSas =
-            [ qsValueMap.["sr"]
-              qsValueMap.["skoid"]
-              qsValueMap.["sktid"]
-              qsValueMap.["ske"]
-              qsValueMap.["sks"]    ] |>
+            [ qsValueMap.[signedResource]
+              qsValueMap.[signedObjectId]
+              qsValueMap.[signedTenantId]
+              qsValueMap.[signedKeyExpiryTime]
+              qsValueMap.[signedKeyService]    ] |>
             List.forall (function | Some (Parsed _) -> true | _ -> false) &&
             (isSignedDirectoryDepthRequired = isSignedDirectoryDepthPresent)
         
@@ -269,15 +269,15 @@ let private parse url =
             [ serviceDependantRequiredKeyForServiceSas ] |>
             List.forall (function | Ok _ -> true | _ -> false) &&
             (isSignedDirectoryDepthRequired = isSignedDirectoryDepthPresent) &&
-            (not <| isOk (qsValueMap.["srt"] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue(Error ""))) &&
-            (not <| isOk (qsValueMap.["skoid"] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue(Error "")))
+            (not <| isOk (qsValueMap.[signedResourceTypes] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue(Error ""))) &&
+            (not <| isOk (qsValueMap.[signedObjectId] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue(Error "")))
         
         let isValidSas =
-            [ qsValueMap.["sv"]
-              qsValueMap.["se"]
-              qsValueMap.["sp"] ] |>
+            [ qsValueMap.[signedVersion]
+              qsValueMap.[signedExpiry]
+              qsValueMap.[signedPermissions] ] |>
             List.forall (function | Some (Parsed _) -> true | _ -> false) &&
-            Option.isSome qsValueMap.["sig"]
+            Option.isSome qsValueMap.[signature]
         
         let (uniqueQsKeys, sasType) =
             match isValidSas, isAccountSas, isUserSas, isServiceSas with
@@ -333,8 +333,8 @@ let private parse url =
             
             {|
                 Parameter     = "Version"
-                Value         = qsValueMap.["sv"]
-                FieldName     = "sv"
+                Value         = qsValueMap.[signedVersion]
+                FieldName     = signedVersion
             |}
             
             {|
@@ -345,26 +345,26 @@ let private parse url =
             
             {|
                 Parameter     = "Expiry time"
-                Value         = qsValueMap.["se"]
-                FieldName     = "se"
+                Value         = qsValueMap.[signedExpiry]
+                FieldName     = signedExpiry
             |}
             
             {|
                 Parameter     = "Services"
-                Value         = qsValueMap.["ss"]
-                FieldName     = "ss"
+                Value         = qsValueMap.[signedServices]
+                FieldName     = signedServices
             |}
             
             {|
                 Parameter     = "Resource"
-                Value         = qsValueMap.["sr"]
-                FieldName     = "sr"
+                Value         = qsValueMap.[signedResource]
+                FieldName     = signedResource
             |}
             
             {|
                 Parameter     = "Permissions"
-                Value         = qsValueMap.["sp"]
-                FieldName     = "sp"
+                Value         = qsValueMap.[signedPermissions]
+                FieldName     = signedPermissions
             |}
             
             {|
@@ -381,31 +381,31 @@ let private parse url =
             
             {|
                 Parameter     = "Types"
-                Value         = qsValueMap.["srt"]
-                FieldName     = "srt"
+                Value         = qsValueMap.[signedResourceTypes]
+                FieldName     = signedResourceTypes
             |}
             
             {|
                 Parameter     = "Signature"
-                Value         = qsValueMap.["sig"]
-                FieldName     = "sig"
+                Value         = qsValueMap.[signature]
+                FieldName     = signature
             |}
             
-//"Table name"           "tn"
+//"Table name"           tableName
 //"From partition key"   "spk"
 //"From row key"         "srk"
 //"To partition key"     "epk"
 //"To row key"           "erk"
 //"Policy"               "si"
-//"Object ID"            "skoid"
-//"Tenand ID"            "sktid"
+//"Object ID"            signedObjectId
+//"Tenand ID"            signedTenantId
 //"Key start time"       "skt"
-//"Key expiry time"      "ske"
-//"Key service"          "sks"
+//"Key expiry time"      signedKeyExpiryTime
+//"Key service"          signedKeyService
 //"AuthorizedObjectId"   "saoid"
 //"UnauthorizedObjectId" "suoid"
 //"Correlation ID"       "scid"
-//"Directory depth"      "sdd"
+//"Directory depth"      signedDirectoryDepth
 //"Cache-Control"        "rscc"
 //"Content-Disposition"  "rscd"
 //"Content-Encoding"     "rsce"
