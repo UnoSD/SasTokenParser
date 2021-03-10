@@ -290,30 +290,35 @@ let private getGuid text =
     | true, _ -> Ok text
     | _       -> Error "Invalid GUID"
 
+let private getInteger text =
+    match Int32.TryParse(text) with
+    | true, _ -> Ok text
+    | _       -> Error "Invalid number"
+
 let private queryStringValidators = [
     signedVersion             , (sprintf "API version: %s" >> Ok)
-    signedPermissions         , getPermissionsExplanation
+    signedServices            , getServicesExplanation
+    signedKeyService          , getServicesExplanation
     signedStart               , getReadableDateTime
     signedExpiry              , getReadableDateTime
     signedKeyExpiryTime       , getReadableDateTime
     signedKeyStartTime        , getReadableDateTime
-    signedServices            , getServicesExplanation
+    signedObjectId            , getGuid
+    signedTenantId            , getGuid
+    signedAuthorizedObjectId  , getGuid
+    signedUnauthorizedObjectId, getGuid
     signedResourceTypes       , getResourceTypesExplanation
+    signedPermissions         , getPermissionsExplanation
     signedResource            , getResourcesExplanation
     signedIp                  , getIpExplanation
     signedProtocol            , getProtocol
-    signedObjectId            , getGuid
-    signedTenantId            , getGuid
-    signedKeyService          , Ok
-    signedDirectoryDepth      , Ok
+    signedDirectoryDepth      , getInteger
     tableName                 , Ok
     startPk                   , Ok
     startRk                   , Ok
     endPk                     , Ok
     endRk                     , Ok
     signedIdentifier          , Ok
-    signedAuthorizedObjectId  , Ok
-    signedUnauthorizedObjectId, Ok
     signedCorrelationId       , Ok
     cacheControlResponse      , Ok
     contentDispositionResponse, Ok
