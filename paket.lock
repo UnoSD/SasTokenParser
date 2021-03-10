@@ -71,7 +71,7 @@ NUGET
       Fable.Browser.Dom (>= 2.0.1)
       Fable.Core (>= 3.1.5)
       FSharp.Core (>= 4.7.2)
-    Feliz (1.36)
+    Feliz (1.37)
       Fable.Core (>= 3.1.5)
       Fable.React (>= 7.0.1)
       Feliz.CompilerPlugins (>= 1.3)
