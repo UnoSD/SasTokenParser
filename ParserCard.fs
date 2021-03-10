@@ -637,7 +637,7 @@ let parserCard model dispatch =
             disclaimer "Note"
                        "This page does not store or share URLs or any extracted data, all is processed within the browser boundaries"
             
-            urlField "Insert URL/token to parse" Icon.Link
+            urlField "Insert URL to parse (or add to page URL as fragment: https://...#<SAS URL>)" Icon.Link
             
             Html.table [
                 tableHeader [
