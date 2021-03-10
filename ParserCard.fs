@@ -34,7 +34,7 @@ let private multilineStringToHtml (text : string) =
     text.Split('\n') |>
     Array.fold (fun acc line -> Html.text line :: Html.br [] :: acc) List.empty
 
-let private row (parameter : string) (readableValue : Result<string, string>) (fieldName : string) (value : Result<string, string>) =
+let private row (parameter : string) (readableValue : Result<string, string>) (fieldName : string) (value : string) =
     [
         Html.tableCell [ Html.strong [ Html.text parameter ] ]
         Html.tableCell [ Html.div [
@@ -43,11 +43,7 @@ let private row (parameter : string) (readableValue : Result<string, string>) (f
             | Error error      -> Html.strong [ prop.style [ style.color.red ]; prop.children [ Html.text error ] ]
         ] ]
         Html.tableCell [ Html.text fieldName ]
-        Html.tableCell [
-            match value with
-            | Ok value    -> Html.text value
-            | Error error -> Html.strong [ prop.style [ style.color.red ]; prop.children [ Html.text error ] ]
-        ]
+        Html.tableCell [ Html.text value ]
     ] |>
     Html.tableRow
 
@@ -94,13 +90,13 @@ let private (|UrlSegments|_|) (url : Uri) =
 
 let private getBlobName (url : Uri) =
     match url with
-    | UrlSegments (_ :: _ :: _) & UrlSegments (_ :: xs) -> Ok <| String.Join("/", xs)
-    | _                                                 -> Error "Unable to parse blob name"
+    | UrlSegments (_ :: _ :: _) & UrlSegments (_ :: xs) -> Some <| String.Join("/", xs)
+    | _                                                 -> None
     
 let private getContainerName (url : Uri) =
     match url with
-    | UrlSegments (x :: _) -> Ok x
-    | _                    -> Error "Unable to parse container name"
+    | UrlSegments (x :: _) -> Some x
+    | _                    -> None
     
 let private getCloud domain =
     cloudMap |> Map.tryFind domain |> Option.defaultValue domain
@@ -163,11 +159,9 @@ let private getProtocol =
     | x            -> Error <| sprintf "Unable to parse protocol %s" x
 
 let private parseHost (host : string) =
-    let errorMessage = "Unsupported URL (custom domain or bad URL, add a nice error message)"
-    
     match host.Split('.') with
-    | [| account; service; "core"; cloud; "net" |] -> {| Account = Ok account; Service = Ok service; Cloud = Ok cloud |}
-    | _ ->                                            {| Account = Error errorMessage; Service = Error ""; Cloud = Error "" |}
+    | [| account; service; "core"; cloud; "net" |] -> Some {| Account = account; Service = service; Cloud = cloud |}
+    | _ ->                                            None
 
 type private SasType<'a> = | Account of 'a | Service of 'a | User of 'a | Invalid of 'a
 
@@ -238,14 +232,14 @@ let private parse url =
             tryGetQueryStringValueAndBind "tn"    Ok
         
         let signature =
-            tryGetNonEmptyQueryStringValue "sig"  |> Option.map Ok |> Option.defaultValue (Error "")
+            tryGetNonEmptyQueryStringValue "sig"
         
         let serviceDependantRequiredKeyForServiceSas =
-            match hostInfo.Service with
-            | Ok "blob"
-            | Ok "file"  -> signedResource |> Option.map (fun x -> x.Parsed) |> Option.defaultValue (Error "Missing signed resource")
-            | Ok "table" -> tableName      |> Option.map (fun x -> x.Parsed) |> Option.defaultValue (Error "Missing table name")
-            | _          -> Ok ""
+            match hostInfo |> Option.map (fun x -> x.Service) with
+            | Some "blob"
+            | Some "file"  -> signedResource |> Option.map (fun x -> x.Parsed) |> Option.defaultValue (Error "Missing signed resource")
+            | Some "table" -> tableName      |> Option.map (fun x -> x.Parsed) |> Option.defaultValue (Error "Missing table name")
+            | _            -> Ok ""
         
         let (|Parsed|_|) (record : {| Parsed : Result<string, string>; Source : string |}) =
             match record.Parsed with
@@ -282,7 +276,7 @@ let private parse url =
             [ signedResourceTypes
               signedServices      ] |>
             List.forall (function | Some (Parsed _) -> true | _ -> false) &&
-            not <| isOk containerName
+            not <| Option.isSome containerName
         
         let isUserSas =
             [ signedResource
@@ -305,44 +299,162 @@ let private parse url =
               signedExpiry
               signedPermissions ] |>
             List.forall (function | Some (Parsed _) -> true | _ -> false) &&
-            (match signature with | Ok _ -> true | _ -> false)
+            Option.isSome signature
         
         let sasType =
             match isValidSas, isAccountSas, isUserSas, isServiceSas with
-            | true, true, false, false -> Account
-            | true, false, false, true -> Service
-            | true, false, true, false -> User
-            | _                        -> Invalid
+            | true, true , false, false -> Ok "Account SAS"
+            | true, false, false, true  -> Ok "Service SAS"        
+            | true, false, true , false -> Ok "User delegation SAS"
+            | _                         -> Error "Invalid SAS token"                   
+                
+        let known (parsed, source) =
+            Some {| Parsed = parsed; Source = source |}
+            
+        let getResult map =
+            hostInfo |>
+            Option.map (map >> Ok) |>
+            Option.defaultValue (Error "Invalid URL") 
         
-        printfn "Is valid sas %A" (isValidSas, isAccountSas, isUserSas, isServiceSas)
+        let account =
+            getResult (fun x -> x.Account)
         
-        {|
-            Account       = hostInfo.Account
-            Service       = hostInfo.Service
-            Domain        = hostInfo.Cloud
-            Cloud         = hostInfo.Cloud |> Result.map getCloud
-            Container     = containerName
-            Blob          = getBlobName url
-            Version       = signedVersion                                           |> Option.defaultValue ({| Parsed = Ok "Missing"; Source = "" |})
-            Services      = signedServices                                          |> Option.defaultValue ({| Parsed = Ok "Missing"; Source = "" |})
-            Start         = tryGetQueryStringValueAndBind "st"  getReadableDateTime |> Option.defaultValue ({| Parsed = Ok "Missing"; Source = "" |})
-            Expiry        = signedExpiry                                            |> Option.defaultValue ({| Parsed = Ok "Missing"; Source = "" |})
-            Resource      = signedResource                                          |> Option.defaultValue ({| Parsed = Ok "Missing"; Source = "" |})
-            Permissions   = signedPermissions                                       |> Option.defaultValue ({| Parsed = Ok "Missing"; Source = "" |})
-            IP            = tryGetQueryStringValueAndBind "sip" getIpExplanation    |> Option.defaultValue ({| Parsed = Ok "Missing"; Source = "" |})
-            Protocol      = tryGetQueryStringValueAndBind "spr" getProtocol         |> Option.defaultValue ({| Parsed = Ok "Missing"; Source = "" |})
-            Types         = signedResourceTypes                                     |> Option.defaultValue ({| Parsed = Ok "Missing"; Source = "" |})
-            Signature     = signature
-        |} |> sasType)
-
-let private serviceSas =
-    Ok "Service SAS"
-    
-let private accountSas =
-    Ok "Account SAS"
-    
-let private userSas =
-    Ok "User delegation SAS"
+        let service =
+            getResult (fun x -> x.Service)
+        
+        let domain =
+            getResult (fun x -> x.Cloud)
+        
+        let cloud =
+            domain |>
+            Result.map getCloud
+        
+        let toOption =
+            function
+            | Ok value -> Some value
+            | Error _  -> None
+        
+        let cloud =
+            domain |> toOption |> Option.map (fun x -> {| Parsed = cloud; Source = x |})
+        
+        [
+            {|
+                Parameter     = "Type"
+                Value         = known (sasType, "URL")
+                FieldName     = "URL and QS"
+            |}
+            
+            {|
+                Parameter     = "Account"
+                Value         = known (account, "URL")
+                FieldName     = "//{account}."
+            |}
+            
+            {|
+                Parameter     = "Service"
+                Value         = known (service, "URL")
+                FieldName     = ".{service}.core"
+            |}
+            
+            {|
+                Parameter     = "Cloud"
+                Value         = cloud
+                FieldName     = "core.{cloud}.net"
+            |}
+            
+            {|
+                Parameter     = "Container"
+                Value         = containerName |> Option.map (fun s -> {| Parsed = Ok s; Source = s |})
+                FieldName     = ".net/{container}/"
+            |}
+            
+            {|
+                Parameter     = "Blob"
+                Value         = getBlobName url |> Option.map (fun s -> {| Parsed = Ok s; Source = s |})
+                FieldName     = "{container}/{blob}"
+            |}
+            
+            {|
+                Parameter     = "Version"
+                Value         = signedVersion
+                FieldName     = "sv"
+            |}
+            
+            {|
+                Parameter     = "Start time"
+                Value         = tryGetQueryStringValueAndBind "st" getReadableDateTime
+                FieldName     = "st"
+            |}
+            
+            {|
+                Parameter     = "Expiry time"
+                Value         = signedExpiry
+                FieldName     = "se"
+            |}
+            
+            {|
+                Parameter     = "Services"
+                Value         = signedServices
+                FieldName     = "ss"
+            |}
+            
+            {|
+                Parameter     = "Resource"
+                Value         = signedResource
+                FieldName     = "sr"
+            |}
+            
+            {|
+                Parameter     = "Permissions"
+                Value         = signedPermissions
+                FieldName     = "sp"
+            |}
+            
+            {|
+                Parameter     = "Allowed IP"
+                Value         = tryGetQueryStringValueAndBind "sip" getIpExplanation
+                FieldName     = "sip"
+            |}
+            
+            {|
+                Parameter     = "Protocol"
+                Value         = tryGetQueryStringValueAndBind "spr" getProtocol
+                FieldName     = "spr"
+            |}
+            
+            {|
+                Parameter     = "Types"
+                Value         = signedResourceTypes
+                FieldName     = "srt"
+            |}
+            
+            {|
+                Parameter     = "Signature"
+                Value         = signature |> Option.map (fun s -> {| Parsed = Ok "HMAC signature"; Source = s |})
+                FieldName     = "sig"
+            |}
+            
+//"Table name"           "tn"
+//"From partition key"   "spk"
+//"From row key"         "srk"
+//"To partition key"     "epk"
+//"To row key"           "erk"
+//"Policy"               "si"
+//"Object ID"            "skoid"
+//"Tenand ID"            "sktid"
+//"Key start time"       "skt"
+//"Key expiry time"      "ske"
+//"Key service"          "sks"
+//"AuthorizedObjectId"   "saoid"
+//"UnauthorizedObjectId" "suoid"
+//"Correlation ID"       "scid"
+//"Directory depth"      "sdd"
+//"Cache-Control"        "rscc"
+//"Content-Disposition"  "rscd"
+//"Content-Encoding"     "rsce"
+//"Content-Language"     "rscl"
+//"Content-Type"         "rsct"
+        ])
 
 let private hmacSignature =
     Ok "HMAC signature"
@@ -350,17 +462,19 @@ let private hmacSignature =
 let private yourUrl =
     Ok "Your URL"
 
-let private empty =
-    Ok ""
-
 let parserCard model dispatch =
     let urlField =
         urlField model dispatch
         
-    let createSasRowsOrDefault fromSas defaultRows =
+    let rows =
         parse model.Url |>
-        Option.map (fromSas >> (List.filter ((<>)Html.none))) |>
-        Option.defaultValue defaultRows
+        Option.map (fun sas -> sas |>
+                               List.choose (fun x -> match x.Value with
+                                                     | Some y -> Some {| FieldName = x.FieldName; Parameter = x.Parameter; Value = y |}
+                                                     | None   -> None) |>
+                               List.map(fun r -> row r.Parameter r.Value.Parsed r.FieldName r.Value.Source)) |>
+        Option.map ((List.filter ((<>)Html.none))) |>
+        Option.defaultValue [ row "Type" (Error "Invalid URL") "URL" "URL" ]
     
     let disclaimer title text =
         if model.DisclaimerVisible then
@@ -383,76 +497,7 @@ let parserCard model dispatch =
                     th "Value"
                 ]
                 Html.tableBody [
-                    yield! createSasRowsOrDefault (function
-                        | Service sas -> [
-                                row "Type"               serviceSas             "URL"                yourUrl
-                                row "Account"            sas.Account            "//{account}."       sas.Account
-                                row "Service"            sas.Service            ".{service}.core"    sas.Service      
-                                row "Cloud"              sas.Cloud              "core.{cloud}.net"   sas.Domain         
-                                row "Container"          sas.Container          ".net/{container}/"  sas.Container  
-                                row "Blob"               sas.Blob               "{container}/{blob}" sas.Blob            
-                                row "Version"            sas.Version.Parsed     "sv"                 (sas.Version.Source     |> Ok)
-                                row "Start time"         sas.Start.Parsed       "st"                 (sas.Start.Source       |> Ok)
-                                row "Expiry time"        sas.Expiry.Parsed      "se"                 (sas.Expiry.Source      |> Ok)
-                                row "Resource"           sas.Resource.Parsed    "sr"                 (sas.Resource.Source    |> Ok)
-                              //row "Table name"         sas.Resource.Parsed    "tn"                 (sas.Resource.Source    |> Ok)
-                              //row "From partition key" sas.Resource.Parsed    "spk"                (sas.Resource.Source    |> Ok)
-                              //row "From row key"       sas.Resource.Parsed    "srk"                (sas.Resource.Source    |> Ok)
-                              //row "To partition key"   sas.Resource.Parsed    "epk"                (sas.Resource.Source    |> Ok)
-                              //row "To row key"         sas.Resource.Parsed    "erk"                (sas.Resource.Source    |> Ok)
-                                row "Permissions"        sas.Permissions.Parsed "sp"                 (sas.Permissions.Source |> Ok)
-                                row "Allowed IP"         sas.IP.Parsed          "sip"                (sas.IP.Source          |> Ok)
-                              //row "Policy"             sas.Resource.Parsed    "si"                 (sas.Resource.Source    |> Ok)
-                                row "Protocol"           sas.Protocol.Parsed    "spr"                (sas.Protocol.Source    |> Ok)
-                                row "Signature"          hmacSignature          "sig"                sas.Signature
-                            ]
-                        | Account sas -> [
-                                row "Type"        accountSas             "URL"              yourUrl
-                                row "Account"     sas.Account            "//{account}."     sas.Account
-                                row "Service"     sas.Service            ".{service}.core"  sas.Service
-                                row "Cloud"       sas.Cloud              "core.{cloud}.net" sas.Domain
-                                row "Version"     sas.Version.Parsed     "sv"               (sas.Version.Source     |> Ok)
-                                row "Services"    sas.Services.Parsed    "ss"               (sas.Services.Source    |> Ok)
-                                row "Types"       sas.Types.Parsed       "srt"              (sas.Types.Source       |> Ok)
-                                row "Permissions" sas.Permissions.Parsed "sp"               (sas.Permissions.Source |> Ok)
-                                row "Start time"  sas.Start.Parsed       "st"               (sas.Start.Source       |> Ok)
-                                row "Expiry time" sas.Expiry.Parsed      "se"               (sas.Expiry.Source      |> Ok)
-                                row "Allowed IP"  sas.IP.Parsed          "sip"              (sas.IP.Source          |> Ok)
-                                row "Protocol"    sas.Protocol.Parsed    "spr"              (sas.Protocol.Source    |> Ok)
-                                row "Signature"   hmacSignature          "sig"              sas.Signature
-                            ]
-                        | User sas -> [
-                                row "Type"                 userSas                "URL"                yourUrl
-                                row "Account"              sas.Account            "//{account}."       sas.Account
-                                row "Service"              sas.Service            ".{service}.core"    sas.Service      
-                                row "Cloud"                sas.Cloud              "core.{cloud}.net"   sas.Domain         
-                                row "Version"              sas.Version.Parsed     "sv"                 (sas.Version.Source     |> Ok)
-                                row "Resource"             sas.Resource.Parsed    "sr"                 (sas.Resource.Source    |> Ok)
-                                row "Start time"           sas.Start.Parsed       "st"                 (sas.Start.Source       |> Ok)
-                                row "Expiry time"          sas.Expiry.Parsed      "se"                 (sas.Expiry.Source      |> Ok)
-                                row "Permissions"          sas.Permissions.Parsed "sp"                 (sas.Permissions.Source |> Ok)
-                                row "Allowed IP"           sas.IP.Parsed          "sip"                (sas.IP.Source          |> Ok)
-                                row "Protocol"             sas.Protocol.Parsed    "spr"                (sas.Protocol.Source    |> Ok)
-                              //row "Object ID"            sas.Resource.Parsed    "skoid"              (sas.Resource.Source    |> Ok)  
-                              //row "Tenand ID"            sas.Resource.Parsed    "sktid"              (sas.Resource.Source    |> Ok)  
-                              //row "Key start time"       sas.Resource.Parsed    "skt"                (sas.Resource.Source    |> Ok)  
-                              //row "Key expiry time"      sas.Resource.Parsed    "ske"                (sas.Resource.Source    |> Ok)  
-                              //row "Key service"          sas.Resource.Parsed    "sks"                (sas.Resource.Source    |> Ok)  
-                              //row "AuthorizedObjectId"   sas.Resource.Parsed    "saoid"              (sas.Resource.Source    |> Ok)  
-                              //row "UnauthorizedObjectId" sas.Resource.Parsed    "suoid"              (sas.Resource.Source    |> Ok)  
-                              //row "Correlation ID"       sas.Resource.Parsed    "scid"               (sas.Resource.Source    |> Ok)  
-                              //row "Directory depth"      sas.Resource.Parsed    "sdd"                (sas.Resource.Source    |> Ok)  
-                              //row "Cache-Control"        sas.Resource.Parsed    "rscc"               (sas.Resource.Source    |> Ok)  
-                              //row "Content-Disposition"  sas.Resource.Parsed    "rscd"               (sas.Resource.Source    |> Ok)  
-                              //row "Content-Encoding"     sas.Resource.Parsed    "rsce"               (sas.Resource.Source    |> Ok)  
-                              //row "Content-Language"     sas.Resource.Parsed    "rscl"               (sas.Resource.Source    |> Ok)  
-                              //row "Content-Type"         sas.Resource.Parsed    "rsct"               (sas.Resource.Source    |> Ok)  
-                                row "Signature"            hmacSignature          "sig"                sas.Signature
-                            ]
-                        | Invalid _ -> [
-                                row "Invalid SAS token"    empty                  ""                   empty
-                            ])                            
-                      [         row "Invalid SAS token"    empty                  ""                   empty ]
+                    yield! rows
                 ]
             ]
         ]
