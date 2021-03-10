@@ -2,6 +2,7 @@ source https://www.nuget.org/api/v2
 storage:none
 framework: netstandard2.0
 
+nuget Fable.Browser.Url
 nuget Fable.Fetch
 nuget Fable.JsonProvider
 nuget Feliz
