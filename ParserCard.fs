@@ -198,6 +198,7 @@ let private endPk                      = "epk"
 let private endRk                      = "erk"
 let private signedIdentifier           = "si"
 let private signedKeyStartTime         = "skt"
+let private signedKeyVersion           = "skv"
 let private signedAuthorizedObjectId   = "saoid"
 let private signedUnauthorizedObjectId = "suoid"
 let private signedCorrelationId        = "scid"
@@ -262,6 +263,7 @@ let private getSasType (qsValueMap : Map<string, {| Parsed : Result<string, stri
           signedObjectId
           signedTenantId
           signedKeyExpiryTime
+          signedKeyVersion
           signedKeyService    ] |>
         allValidInQueryString   &&
         (isSignedDirectoryDepthRequired = isSignedDirectoryDepthPresent)
@@ -313,6 +315,7 @@ let private queryStringValidators = [
     signedIp                  , getIpExplanation
     signedProtocol            , getProtocol
     signedDirectoryDepth      , getInteger
+    signedKeyVersion          , Ok
     tableName                 , Ok
     startPk                   , Ok
     startRk                   , Ok
@@ -337,6 +340,15 @@ let private tryGetQueryStringValueAndBind query key func =
     tryGetNonEmptyQueryStringValue query key |>
     Option.map (fun value -> {| Source = value; Parsed = func value |})
 
+let private unsupportedRowInfo query =
+    query |>
+    Map.filter (fun key _ -> queryStringValidators |> List.exists (fun (k, _) -> k = key) |> not) |>
+    Seq.map (fun kvp -> kvp.Key) |>
+    List.ofSeq |>
+    function
+    | [ ] -> None
+    |  x  -> Some {| Parsed = Error <| String.Join(", ", x); Source = "" |}
+
 // account: https://myaccount.blob.core.windows.net/?restype=service&comp=properties&sv=2019-02-02&ss=bf&srt=s&st=2019-08-01T22%3A18%3A26Z&se=2019-08-10T02%3A23%3A26Z&sr=b&sp=rw&sip=168.1.5.60-168.1.5.70&spr=https&sig=F%6GRVAZ5Cdj2Pw4tgU7IlSTkWgn7bUkkAg8P6HESXwmf%4B
 // service: https://myaccount.blob.core.windows.net/sascontainer/sasblob.txt?sv=2019-02-02&st=2019-04-29T22%3A18%3A26Z&se=2019-04-30T02%3A23%3A26Z&sr=b&sp=rw&sip=168.1.5.60-168.1.5.70&spr=https&sig=Z%2FRHIX5Xcg0Mq2rqI3OlWTjEg2tYkboXr1P9ZUXDtkk%3D
 // user   : https://myaccount.blob.core.windows.net/sascontainer/sasblob.txt?se=2021-03-10&sp=racwdl&sv=2018-11-09&sr=c&skoid=00000000-0000-0000-0000-000000000000&sktid=00000000-0000-0000-0000-000000000000&skt=2021-03-09T20%3A18%3A58Z&ske=2021-03-10T00%3A00%3A00Z&sks=b&skv=2018-11-09&sig=FiBaLiCorDnuS18d0000bmSLehDyG0uBT1111bmazoI%3D
@@ -360,9 +372,9 @@ let createRowInfos (url : Uri) =
     
     let (uniqueQsKeys, sasType) =
         match getSasType qsValueMap service containerName with
-        | Account -> "srt ss"                     , Ok "Account SAS"
-        | Service -> "sr/tn sdd"                  , Ok "Service SAS"        
-        | User    -> "sr skoid sktid ske sks sdd" , Ok "User delegation SAS"
+        | Account -> "srt ss"                     , Ok    "Account SAS"
+        | Service -> "sr/tn sdd"                  , Ok    "Service SAS"        
+        | User    -> "sr skoid sktid ske sks sdd" , Ok    "User delegation SAS"
         | _       -> ""                           , Error "Invalid SAS token"                   
 
     let createRowInfoFromHostInfo parse map =
@@ -582,9 +594,21 @@ let createRowInfos (url : Uri) =
         |}
          
         {|
+            Parameter     = "Key version"
+            Value         = qsValueMap.[signedKeyVersion]
+            FieldName     = signedKeyVersion
+        |}
+         
+        {|
             Parameter     = "Signature"
             Value         = qsValueMap.[signature]
             FieldName     = signature
+        |}
+        
+        {|
+            Parameter     = "Unsupported query keys"
+            Value         = unsupportedRowInfo query
+            FieldName     = ""
         |}
     ]
 
