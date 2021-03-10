@@ -166,6 +166,11 @@ let private parseHost (host : string) =
     | [| account; service; "core"; domain; "net" |] -> Some {| Account = account; Service = service; Domain = domain |}
     | _ ->                                            None
 
+let private isOk =
+    function
+    | Ok _    -> true
+    | Error _ -> false
+
 type private SasType<'a> = | Account of 'a | Service of 'a | User of 'a | Invalid of 'a
 
 let private signedResource       = "sr"
@@ -185,10 +190,15 @@ let private signedProtocol       = "spr"
 let private tableName            = "tn"
 let private signature            = "sig"
 
-let private parse url =
+let private getRowInfos url =
     tryParseUrl url |>
-    Option.map (fun url -> (url, parseHost url.Host, getQueryStringMap url.Query.[1..])) |>
-    Option.map (fun (url, hostInfo, query) ->
+    Option.map (fun url ->
+        let hostInfo =
+            parseHost url.Host
+            
+        let query =
+            getQueryStringMap url.Query.[1..]
+            
         let tryGetNonEmptyQueryStringValue key =
             query |>
             Map.tryFind key |>
@@ -239,11 +249,6 @@ let private parse url =
             match qsValueMap.[signedDirectoryDepth] with
             | Some (Parsed _) -> true
             | _               -> false
-        
-        let isOk =
-            function
-            | Ok _    -> true
-            | Error _ -> false
         
         let containerName =
             getContainerName url
@@ -433,7 +438,7 @@ let parserCard model dispatch =
         urlField model dispatch
         
     let rows =
-        parse model.Url |>
+        getRowInfos model.Url |>
         Option.map (fun sas -> sas |>
                                List.choose (fun x -> match x.Value with
                                                      | Some y -> Some {| FieldName = x.FieldName; Parameter = x.Parameter; Value = y |}
