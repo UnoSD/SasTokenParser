@@ -175,7 +175,7 @@ module private Result =
     let isError res =
         not <| isOk res
 
-type private SasType<'a> = | Account of 'a | Service of 'a | User of 'a | Invalid of 'a
+type private SasType = Account | Service | User | Invalid
 
 let private signedResource       = "sr"
 let private signedVersion        = "sv"
@@ -194,46 +194,13 @@ let private signedProtocol       = "spr"
 let private tableName            = "tn"
 let private signature            = "sig"
 
-let private queryStringValidators = [
-    signedVersion       , (sprintf "API version: %s" >> Ok)
-    signedPermissions   , getPermissionsExplanation
-    signedStart         , getReadableDateTime
-    signedExpiry        , getReadableDateTime
-    signedServices      , getServicesExplanation
-    signedResourceTypes , getResourceTypesExplanation
-    signedResource      , getResourcesExplanation
-    signedIp            , getIpExplanation
-    signedProtocol      , getProtocol
-    signedObjectId      , Ok
-    signedTenantId      , Ok
-    signedKeyExpiryTime , Ok
-    signedKeyService    , Ok
-    signedDirectoryDepth, Ok
-    tableName           , Ok
-    signature           , (fun _ -> Ok "HMAC signature")
-]
+let private createOptionRowInfo parse opt =
+    Option.map (fun x -> {| Parsed = parse x; Source = x |}) opt
 
-let createRowInfos (url : Uri) =
-    let hostInfo =
-        parseHost url.Host
-        
-    let query =
-        getQueryStringMap url.Query.[1..]
-        
-    let tryGetNonEmptyQueryStringValue key =
-        query |>
-        Map.tryFind key |>
-        Option.flatten
-    
-    let tryGetQueryStringValueAndBind key func =
-        tryGetNonEmptyQueryStringValue key |>
-        Option.map (fun value -> {| Source = value; Parsed = func value |})
-    
-    let qsValueMap =
-        queryStringValidators |>
-        List.map (fun (key, parser) -> key, tryGetQueryStringValueAndBind key parser) |>
-        Map.ofList
-    
+// required for account    sas: [sv se sig sp]    srt ss
+// required for delegation sas: [sv se sig sp] sr skoid sktid ske sks sdd (when sr=d)
+// required for service    sas: [sv se sig sp] sr (only blob/file) tn (only table) sdd (when sr=d)
+let private getSasType (qsValueMap : Map<string, {| Parsed : Result<string, string>; Source : string |} option>) service containerName =
     let (|Parsed|_|) (record : {| Parsed : Result<string, string>; Source : string |}) =
         match record.Parsed with
         | Ok x -> Some x
@@ -248,17 +215,6 @@ let createRowInfos (url : Uri) =
         match qsValueMap.[signedDirectoryDepth] with
         | Some (Parsed _) -> true
         | _               -> false
-    
-    let containerName =
-        getContainerName url
-    
-    // account: https://myaccount.blob.core.windows.net/?restype=service&comp=properties&sv=2019-02-02&ss=bf&srt=s&st=2019-08-01T22%3A18%3A26Z&se=2019-08-10T02%3A23%3A26Z&sr=b&sp=rw&sip=168.1.5.60-168.1.5.70&spr=https&sig=F%6GRVAZ5Cdj2Pw4tgU7IlSTkWgn7bUkkAg8P6HESXwmf%4B
-    // service: https://myaccount.blob.core.windows.net/sascontainer/sasblob.txt?sv=2019-02-02&st=2019-04-29T22%3A18%3A26Z&se=2019-04-30T02%3A23%3A26Z&sr=b&sp=rw&sip=168.1.5.60-168.1.5.70&spr=https&sig=Z%2FRHIX5Xcg0Mq2rqI3OlWTjEg2tYkboXr1P9ZUXDtkk%3D
-    // user   : https://myaccount.blob.core.windows.net/sascontainer/sasblob.txt?se=2021-03-10&sp=racwdl&sv=2018-11-09&sr=c&skoid=00000000-0000-0000-0000-000000000000&sktid=00000000-0000-0000-0000-000000000000&skt=2021-03-09T20%3A18%3A58Z&ske=2021-03-10T00%3A00%3A00Z&sks=b&skv=2018-11-09&sig=FiBaLiCorDnuS18d0000bmSLehDyG0uBT1111bmazoI%3D
-    
-    // required for account    sas: [sv se sig sp] srt ss
-    // required for delegation sas: [sv se sig sp] sr skoid sktid ske sks sdd (when sr=d)
-    // required for service    sas: [sv se sig sp] sr (only blob/file) tn (only table) sdd (when sr=d)
     
     let allValidInQueryString keys =
         keys |>
@@ -275,7 +231,7 @@ let createRowInfos (url : Uri) =
         not <| isMissingOrInvalid key
     
     let hadServiceSasRequiredKeys =
-        match hostInfo |> Option.map (fun x -> x.Service) with
+        match service with
         | Some "blob"
         | Some "file"  -> isValid signedResource
         | Some "table" -> isValid tableName
@@ -308,17 +264,71 @@ let createRowInfos (url : Uri) =
           signedPermissions ] |>
         List.forall isValid &&
         Option.isSome qsValueMap.[signature]
+        
+    match isValidSas, isAccountSas, isUserSas, isServiceSas with
+    | true, true , false, false -> Account
+    | true, false, false, true  -> Service        
+    | true, false, true , false -> User
+    | _                         -> Invalid      
+
+let private queryStringValidators = [
+    signedVersion       , (sprintf "API version: %s" >> Ok)
+    signedPermissions   , getPermissionsExplanation
+    signedStart         , getReadableDateTime
+    signedExpiry        , getReadableDateTime
+    signedServices      , getServicesExplanation
+    signedResourceTypes , getResourceTypesExplanation
+    signedResource      , getResourcesExplanation
+    signedIp            , getIpExplanation
+    signedProtocol      , getProtocol
+    signedObjectId      , Ok
+    signedTenantId      , Ok
+    signedKeyExpiryTime , Ok
+    signedKeyService    , Ok
+    signedDirectoryDepth, Ok
+    tableName           , Ok
+    signature           , (fun _ -> Ok "HMAC signature")
+]
+
+// account: https://myaccount.blob.core.windows.net/?restype=service&comp=properties&sv=2019-02-02&ss=bf&srt=s&st=2019-08-01T22%3A18%3A26Z&se=2019-08-10T02%3A23%3A26Z&sr=b&sp=rw&sip=168.1.5.60-168.1.5.70&spr=https&sig=F%6GRVAZ5Cdj2Pw4tgU7IlSTkWgn7bUkkAg8P6HESXwmf%4B
+// service: https://myaccount.blob.core.windows.net/sascontainer/sasblob.txt?sv=2019-02-02&st=2019-04-29T22%3A18%3A26Z&se=2019-04-30T02%3A23%3A26Z&sr=b&sp=rw&sip=168.1.5.60-168.1.5.70&spr=https&sig=Z%2FRHIX5Xcg0Mq2rqI3OlWTjEg2tYkboXr1P9ZUXDtkk%3D
+// user   : https://myaccount.blob.core.windows.net/sascontainer/sasblob.txt?se=2021-03-10&sp=racwdl&sv=2018-11-09&sr=c&skoid=00000000-0000-0000-0000-000000000000&sktid=00000000-0000-0000-0000-000000000000&skt=2021-03-09T20%3A18%3A58Z&ske=2021-03-10T00%3A00%3A00Z&sks=b&skv=2018-11-09&sig=FiBaLiCorDnuS18d0000bmSLehDyG0uBT1111bmazoI%3D
+let createRowInfos (url : Uri) =
+    let hostInfo =
+        parseHost url.Host
+        
+    let query =
+        getQueryStringMap url.Query.[1..]
+        
+    let tryGetNonEmptyQueryStringValue key =
+        query |>
+        Map.tryFind key |>
+        Option.flatten
+    
+    let tryGetQueryStringValueAndBind key func =
+        tryGetNonEmptyQueryStringValue key |>
+        Option.map (fun value -> {| Source = value; Parsed = func value |})
+    
+    let qsValueMap =
+        queryStringValidators |>
+        List.map (fun (key, parser) -> key, tryGetQueryStringValueAndBind key parser) |>
+        Map.ofList
+    
+    let containerName =
+        getContainerName url
+    
+
+    
+    let service =
+        hostInfo |> Option.map (fun x -> x.Service)
     
     let (uniqueQsKeys, sasType) =
-        match isValidSas, isAccountSas, isUserSas, isServiceSas with
-        | true, true , false, false -> "srt ss"                     , Ok "Account SAS"
-        | true, false, false, true  -> "sr/tn sdd"                  , Ok "Service SAS"        
-        | true, false, true , false -> "sr skoid sktid ske sks sdd" , Ok "User delegation SAS"
-        | _                         -> ""                           , Error "Invalid SAS token"                   
+        match getSasType qsValueMap service containerName with
+        | Account -> "srt ss"                     , Ok "Account SAS"
+        | Service -> "sr/tn sdd"                  , Ok "Service SAS"        
+        | User    -> "sr skoid sktid ske sks sdd" , Ok "User delegation SAS"
+        | _       -> ""                           , Error "Invalid SAS token"                   
             
-    let createOptionRowInfo parse opt =
-        Option.map (fun x -> {| Parsed = parse x; Source = x |}) opt
-    
     let createRowInfoFromHostInfo parse map =
         hostInfo |>
         Option.map map |>
