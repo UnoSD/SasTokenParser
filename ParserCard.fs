@@ -290,6 +290,15 @@ let private queryStringValidators = [
     signature           , (fun _ -> Ok "HMAC signature")
 ]
 
+let private tryGetNonEmptyQueryStringValue query key =
+    query |>
+    Map.tryFind key |>
+    Option.flatten
+
+let private tryGetQueryStringValueAndBind query key func =
+    tryGetNonEmptyQueryStringValue query key |>
+    Option.map (fun value -> {| Source = value; Parsed = func value |})
+
 // account: https://myaccount.blob.core.windows.net/?restype=service&comp=properties&sv=2019-02-02&ss=bf&srt=s&st=2019-08-01T22%3A18%3A26Z&se=2019-08-10T02%3A23%3A26Z&sr=b&sp=rw&sip=168.1.5.60-168.1.5.70&spr=https&sig=F%6GRVAZ5Cdj2Pw4tgU7IlSTkWgn7bUkkAg8P6HESXwmf%4B
 // service: https://myaccount.blob.core.windows.net/sascontainer/sasblob.txt?sv=2019-02-02&st=2019-04-29T22%3A18%3A26Z&se=2019-04-30T02%3A23%3A26Z&sr=b&sp=rw&sip=168.1.5.60-168.1.5.70&spr=https&sig=Z%2FRHIX5Xcg0Mq2rqI3OlWTjEg2tYkboXr1P9ZUXDtkk%3D
 // user   : https://myaccount.blob.core.windows.net/sascontainer/sasblob.txt?se=2021-03-10&sp=racwdl&sv=2018-11-09&sr=c&skoid=00000000-0000-0000-0000-000000000000&sktid=00000000-0000-0000-0000-000000000000&skt=2021-03-09T20%3A18%3A58Z&ske=2021-03-10T00%3A00%3A00Z&sks=b&skv=2018-11-09&sig=FiBaLiCorDnuS18d0000bmSLehDyG0uBT1111bmazoI%3D
@@ -299,25 +308,14 @@ let createRowInfos (url : Uri) =
         
     let query =
         getQueryStringMap url.Query.[1..]
-        
-    let tryGetNonEmptyQueryStringValue key =
-        query |>
-        Map.tryFind key |>
-        Option.flatten
-    
-    let tryGetQueryStringValueAndBind key func =
-        tryGetNonEmptyQueryStringValue key |>
-        Option.map (fun value -> {| Source = value; Parsed = func value |})
-    
+            
     let qsValueMap =
         queryStringValidators |>
-        List.map (fun (key, parser) -> key, tryGetQueryStringValueAndBind key parser) |>
+        List.map (fun (key, parser) -> key, tryGetQueryStringValueAndBind query key parser) |>
         Map.ofList
     
     let containerName =
         getContainerName url
-    
-
     
     let service =
         hostInfo |> Option.map (fun x -> x.Service)
@@ -328,7 +326,7 @@ let createRowInfos (url : Uri) =
         | Service -> "sr/tn sdd"                  , Ok "Service SAS"        
         | User    -> "sr skoid sktid ske sks sdd" , Ok "User delegation SAS"
         | _       -> ""                           , Error "Invalid SAS token"                   
-            
+
     let createRowInfoFromHostInfo parse map =
         hostInfo |>
         Option.map map |>
