@@ -190,268 +190,260 @@ let private signedProtocol       = "spr"
 let private tableName            = "tn"
 let private signature            = "sig"
 
-let private getRowInfos url =
+let createRowInfos (url : Uri) =
+    let hostInfo =
+        parseHost url.Host
+        
+    let query =
+        getQueryStringMap url.Query.[1..]
+        
+    let tryGetNonEmptyQueryStringValue key =
+        query |>
+        Map.tryFind key |>
+        Option.flatten
+    
+    let tryGetQueryStringValueAndBind key func =
+        tryGetNonEmptyQueryStringValue key |>
+        Option.map (fun value -> {| Source = value; Parsed = func value |})
+    
+    let qsValueMap =
+        [ signedVersion       , (sprintf "API version: %s" >> Ok)
+          signedPermissions   , getPermissionsExplanation
+          signedStart         , getReadableDateTime
+          signedExpiry        , getReadableDateTime
+          signedServices      , getServicesExplanation
+          signedResourceTypes , getResourceTypesExplanation
+          signedResource      , getResourcesExplanation
+          signedIp            , getIpExplanation
+          signedProtocol      , getProtocol
+          signedObjectId      , Ok
+          signedTenantId      , Ok
+          signedKeyExpiryTime , Ok
+          signedKeyService    , Ok
+          signedDirectoryDepth, Ok
+          tableName           , Ok
+          signature           , (fun _ -> Ok "HMAC signature") ] |>
+        List.map (fun (key, parser) -> key, tryGetQueryStringValueAndBind key parser) |>
+        Map.ofList
+                  
+    let serviceDependantRequiredKeyForServiceSas =
+        match hostInfo |> Option.map (fun x -> x.Service) with
+        | Some "blob"
+        | Some "file"  -> qsValueMap.[signedResource] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue (Error "Missing signed resource")
+        | Some "table" -> qsValueMap.[tableName] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue (Error "Missing table name")
+        | _            -> Ok ""
+    
+    let (|Parsed|_|) (record : {| Parsed : Result<string, string>; Source : string |}) =
+        match record.Parsed with
+        | Ok x -> Some x
+        | _    -> None
+    
+    let isSignedDirectoryDepthRequired =
+        match qsValueMap.[signedResource] with
+        | Some (Parsed x) when x = "d" -> true
+        | _                            -> false
+    
+    let isSignedDirectoryDepthPresent =
+        match qsValueMap.[signedDirectoryDepth] with
+        | Some (Parsed _) -> true
+        | _               -> false
+    
+    let containerName =
+        getContainerName url
+    
+    // account: https://myaccount.blob.core.windows.net/?restype=service&comp=properties&sv=2019-02-02&ss=bf&srt=s&st=2019-08-01T22%3A18%3A26Z&se=2019-08-10T02%3A23%3A26Z&sr=b&sp=rw&sip=168.1.5.60-168.1.5.70&spr=https&sig=F%6GRVAZ5Cdj2Pw4tgU7IlSTkWgn7bUkkAg8P6HESXwmf%4B
+    // service: https://myaccount.blob.core.windows.net/sascontainer/sasblob.txt?sv=2019-02-02&st=2019-04-29T22%3A18%3A26Z&se=2019-04-30T02%3A23%3A26Z&sr=b&sp=rw&sip=168.1.5.60-168.1.5.70&spr=https&sig=Z%2FRHIX5Xcg0Mq2rqI3OlWTjEg2tYkboXr1P9ZUXDtkk%3D
+    // user   : https://myaccount.blob.core.windows.net/sascontainer/sasblob.txt?se=2021-03-10&sp=racwdl&sv=2018-11-09&sr=c&skoid=00000000-0000-0000-0000-000000000000&sktid=00000000-0000-0000-0000-000000000000&skt=2021-03-09T20%3A18%3A58Z&ske=2021-03-10T00%3A00%3A00Z&sks=b&skv=2018-11-09&sig=FiBaLiCorDnuS18d0000bmSLehDyG0uBT1111bmazoI%3D
+    
+    // required for account    sas: [sv se sig sp] srt ss
+    // required for delegation sas: [sv se sig sp] sr skoid sktid ske sks sdd (when sr=d)
+    // required for service    sas: [sv se sig sp] sr (only blob/file) tn (only table) sdd (when sr=d)
+    
+    let isAccountSas =
+        [ signedResourceTypes
+          signedServices      ] |>
+        List.map (fun x -> Map.find x qsValueMap) |>
+        List.forall (function | Some (Parsed _) -> true | _ -> false) &&
+        not <| Option.isSome containerName
+    
+    let isUserSas =
+        [ signedResource
+          signedObjectId
+          signedTenantId
+          signedKeyExpiryTime
+          signedKeyService    ] |>
+        List.map (fun x -> Map.find x qsValueMap) |>
+        List.forall (function | Some (Parsed _) -> true | _ -> false) &&
+        (isSignedDirectoryDepthRequired = isSignedDirectoryDepthPresent)
+    
+    let isServiceSas =
+        [ serviceDependantRequiredKeyForServiceSas ] |>
+        List.forall (function | Ok _ -> true | _ -> false) &&
+        (isSignedDirectoryDepthRequired = isSignedDirectoryDepthPresent) &&
+        (not <| isOk (qsValueMap.[signedResourceTypes] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue(Error ""))) &&
+        (not <| isOk (qsValueMap.[signedObjectId] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue(Error "")))
+    
+    let isValidSas =
+        [ signedVersion
+          signedExpiry
+          signedPermissions ] |>
+        List.map (fun x -> Map.find x qsValueMap) |>
+        List.forall (function | Some (Parsed _) -> true | _ -> false) &&
+        Option.isSome qsValueMap.[signature]
+    
+    let (uniqueQsKeys, sasType) =
+        match isValidSas, isAccountSas, isUserSas, isServiceSas with
+        | true, true , false, false -> "srt ss"                     , Ok "Account SAS"
+        | true, false, false, true  -> "sr/tn sdd"                  , Ok "Service SAS"        
+        | true, false, true , false -> "sr skoid sktid ske sks sdd" , Ok "User delegation SAS"
+        | _                         -> ""                           , Error "Invalid SAS token"                   
+            
+    let createOptionRowInfo parse opt =
+        Option.map (fun x -> {| Parsed = parse x; Source = x |}) opt
+    
+    let createRowInfoFromHostInfo parse map =
+        hostInfo |>
+        Option.map map |>
+        createOptionRowInfo parse
+    
+    [
+        {|
+            Parameter     = "Type"
+            Value         = Some {| Parsed = sasType; Source = uniqueQsKeys |}
+            FieldName     = "URL and QS"
+        |}
+        
+        {|
+            Parameter     = "Account"
+            Value         = createRowInfoFromHostInfo Ok (fun x -> x.Account)
+            FieldName     = "//{account}."
+        |}
+        
+        {|
+            Parameter     = "Service"
+            Value         = createRowInfoFromHostInfo Ok (fun x -> x.Service)
+            FieldName     = ".{service}.core"
+        |}
+        
+        {|
+            Parameter     = "Cloud"
+            Value         = createRowInfoFromHostInfo getCloudResult (fun x -> x.Domain)
+            FieldName     = "core.{cloud}.net"
+        |}
+        
+        {|
+            Parameter     = "Container"
+            Value         = createOptionRowInfo Ok containerName
+            FieldName     = ".net/{container}/"
+        |}
+        
+        {|
+            Parameter     = "Blob"
+            Value         = getBlobName url |> createOptionRowInfo Ok
+            FieldName     = "{container}/{blob}"
+        |}
+        
+        {|
+            Parameter     = "Version"
+            Value         = qsValueMap.[signedVersion]
+            FieldName     = signedVersion
+        |}
+        
+        {|
+            Parameter     = "Start time"
+            Value         = qsValueMap.[signedStart]
+            FieldName     = signedStart
+        |}
+        
+        {|
+            Parameter     = "Expiry time"
+            Value         = qsValueMap.[signedExpiry]
+            FieldName     = signedExpiry
+        |}
+        
+        {|
+            Parameter     = "Services"
+            Value         = qsValueMap.[signedServices]
+            FieldName     = signedServices
+        |}
+        
+        {|
+            Parameter     = "Resource"
+            Value         = qsValueMap.[signedResource]
+            FieldName     = signedResource
+        |}
+        
+        {|
+            Parameter     = "Permissions"
+            Value         = qsValueMap.[signedPermissions]
+            FieldName     = signedPermissions
+        |}
+        
+        {|
+            Parameter     = "Allowed IP"
+            Value         = qsValueMap.[signedIp]
+            FieldName     = signedIp
+        |}
+        
+        {|
+            Parameter     = "Protocol"
+            Value         = qsValueMap.[signedProtocol]
+            FieldName     = signedProtocol
+        |}
+        
+        {|
+            Parameter     = "Types"
+            Value         = qsValueMap.[signedResourceTypes]
+            FieldName     = signedResourceTypes
+        |}
+        
+        {|
+            Parameter     = "Signature"
+            Value         = qsValueMap.[signature]
+            FieldName     = signature
+        |}
+        
+        //"Table name"           tableName
+        //"From partition key"   "spk"
+        //"From row key"         "srk"
+        //"To partition key"     "epk"
+        //"To row key"           "erk"
+        //"Policy"               "si"
+        //"Object ID"            signedObjectId
+        //"Tenand ID"            signedTenantId
+        //"Key start time"       "skt"
+        //"Key expiry time"      signedKeyExpiryTime
+        //"Key service"          signedKeyService
+        //"AuthorizedObjectId"   "saoid"
+        //"UnauthorizedObjectId" "suoid"
+        //"Correlation ID"       "scid"
+        //"Directory depth"      signedDirectoryDepth
+        //"Cache-Control"        "rscc"
+        //"Content-Disposition"  "rscd"
+        //"Content-Encoding"     "rsce"
+        //"Content-Language"     "rscl"
+        //"Content-Type"         "rsct"
+    ]
+
+let urlToRows url =
+    createRowInfos url |>
+    List.choose (fun x -> match x.Value with
+                          | Some y -> Some <| row x.Parameter y.Parsed x.FieldName y.Source
+                          | None   -> None)
+
+let private rows url =
     tryParseUrl url |>
-    Option.map (fun url ->
-        let hostInfo =
-            parseHost url.Host
-            
-        let query =
-            getQueryStringMap url.Query.[1..]
-            
-        let tryGetNonEmptyQueryStringValue key =
-            query |>
-            Map.tryFind key |>
-            Option.flatten
-        
-        let tryGetQueryStringValueAndBind key func =
-            tryGetNonEmptyQueryStringValue key |>
-            Option.map (fun value -> {| Source = value; Parsed = func value |})
-        
-        let qsValueMap =
-            [ signedVersion       , (sprintf "API version: %s" >> Ok)
-              signedPermissions   , getPermissionsExplanation
-              signedStart         , getReadableDateTime
-              signedExpiry        , getReadableDateTime
-              signedServices      , getServicesExplanation
-              signedResourceTypes , getResourceTypesExplanation
-              signedResource      , getResourcesExplanation
-              signedIp            , getIpExplanation
-              signedProtocol      , getProtocol
-              signedObjectId      , Ok
-              signedTenantId      , Ok
-              signedKeyExpiryTime , Ok
-              signedKeyService    , Ok
-              signedDirectoryDepth, Ok
-              tableName           , Ok
-              signature           , (fun _ -> Ok "HMAC signature") ] |>
-            List.map (fun (key, parser) -> key, tryGetQueryStringValueAndBind key parser) |>
-            Map.ofList
-                      
-        let serviceDependantRequiredKeyForServiceSas =
-            match hostInfo |> Option.map (fun x -> x.Service) with
-            | Some "blob"
-            | Some "file"  -> qsValueMap.[signedResource] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue (Error "Missing signed resource")
-            | Some "table" -> qsValueMap.[tableName] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue (Error "Missing table name")
-            | _            -> Ok ""
-        
-        let (|Parsed|_|) (record : {| Parsed : Result<string, string>; Source : string |}) =
-            match record.Parsed with
-            | Ok x -> Some x
-            | _    -> None
-        
-        let isSignedDirectoryDepthRequired =
-            match qsValueMap.[signedResource] with
-            | Some (Parsed x) when x = "d" -> true
-            | _                            -> false
-        
-        let isSignedDirectoryDepthPresent =
-            match qsValueMap.[signedDirectoryDepth] with
-            | Some (Parsed _) -> true
-            | _               -> false
-        
-        let containerName =
-            getContainerName url
-        
-        // account: https://myaccount.blob.core.windows.net/?restype=service&comp=properties&sv=2019-02-02&ss=bf&srt=s&st=2019-08-01T22%3A18%3A26Z&se=2019-08-10T02%3A23%3A26Z&sr=b&sp=rw&sip=168.1.5.60-168.1.5.70&spr=https&sig=F%6GRVAZ5Cdj2Pw4tgU7IlSTkWgn7bUkkAg8P6HESXwmf%4B
-        // service: https://myaccount.blob.core.windows.net/sascontainer/sasblob.txt?sv=2019-02-02&st=2019-04-29T22%3A18%3A26Z&se=2019-04-30T02%3A23%3A26Z&sr=b&sp=rw&sip=168.1.5.60-168.1.5.70&spr=https&sig=Z%2FRHIX5Xcg0Mq2rqI3OlWTjEg2tYkboXr1P9ZUXDtkk%3D
-        // user   : https://myaccount.blob.core.windows.net/sascontainer/sasblob.txt?se=2021-03-10&sp=racwdl&sv=2018-11-09&sr=c&skoid=00000000-0000-0000-0000-000000000000&sktid=00000000-0000-0000-0000-000000000000&skt=2021-03-09T20%3A18%3A58Z&ske=2021-03-10T00%3A00%3A00Z&sks=b&skv=2018-11-09&sig=FiBaLiCorDnuS18d0000bmSLehDyG0uBT1111bmazoI%3D
-        
-        // required for account    sas: [sv se sig sp] srt ss
-        // required for delegation sas: [sv se sig sp] sr skoid sktid ske sks sdd (when sr=d)
-        // required for service    sas: [sv se sig sp] sr (only blob/file) tn (only table) sdd (when sr=d)
-        
-        let isAccountSas =
-            [ signedResourceTypes
-              signedServices      ] |>
-            List.map (fun x -> Map.find x qsValueMap) |>
-            List.forall (function | Some (Parsed _) -> true | _ -> false) &&
-            not <| Option.isSome containerName
-        
-        let isUserSas =
-            [ signedResource
-              signedObjectId
-              signedTenantId
-              signedKeyExpiryTime
-              signedKeyService    ] |>
-            List.map (fun x -> Map.find x qsValueMap) |>
-            List.forall (function | Some (Parsed _) -> true | _ -> false) &&
-            (isSignedDirectoryDepthRequired = isSignedDirectoryDepthPresent)
-        
-        let isServiceSas =
-            [ serviceDependantRequiredKeyForServiceSas ] |>
-            List.forall (function | Ok _ -> true | _ -> false) &&
-            (isSignedDirectoryDepthRequired = isSignedDirectoryDepthPresent) &&
-            (not <| isOk (qsValueMap.[signedResourceTypes] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue(Error ""))) &&
-            (not <| isOk (qsValueMap.[signedObjectId] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue(Error "")))
-        
-        let isValidSas =
-            [ signedVersion
-              signedExpiry
-              signedPermissions ] |>
-            List.map (fun x -> Map.find x qsValueMap) |>
-            List.forall (function | Some (Parsed _) -> true | _ -> false) &&
-            Option.isSome qsValueMap.[signature]
-        
-        let (uniqueQsKeys, sasType) =
-            match isValidSas, isAccountSas, isUserSas, isServiceSas with
-            | true, true , false, false -> "srt ss"                     , Ok "Account SAS"
-            | true, false, false, true  -> "sr/tn sdd"                  , Ok "Service SAS"        
-            | true, false, true , false -> "sr skoid sktid ske sks sdd" , Ok "User delegation SAS"
-            | _                         -> ""                           , Error "Invalid SAS token"                   
-                
-        let createOptionRowInfo parse opt =
-            Option.map (fun x -> {| Parsed = parse x; Source = x |}) opt
-        
-        let createRowInfoFromHostInfo parse map =
-            hostInfo |>
-            Option.map map |>
-            createOptionRowInfo parse
-        
-        [
-            {|
-                Parameter     = "Type"
-                Value         = Some {| Parsed = sasType; Source = uniqueQsKeys |}
-                FieldName     = "URL and QS"
-            |}
-            
-            {|
-                Parameter     = "Account"
-                Value         = createRowInfoFromHostInfo Ok (fun x -> x.Account)
-                FieldName     = "//{account}."
-            |}
-            
-            {|
-                Parameter     = "Service"
-                Value         = createRowInfoFromHostInfo Ok (fun x -> x.Service)
-                FieldName     = ".{service}.core"
-            |}
-            
-            {|
-                Parameter     = "Cloud"
-                Value         = createRowInfoFromHostInfo getCloudResult (fun x -> x.Domain)
-                FieldName     = "core.{cloud}.net"
-            |}
-            
-            {|
-                Parameter     = "Container"
-                Value         = createOptionRowInfo Ok containerName
-                FieldName     = ".net/{container}/"
-            |}
-            
-            {|
-                Parameter     = "Blob"
-                Value         = getBlobName url |> createOptionRowInfo Ok
-                FieldName     = "{container}/{blob}"
-            |}
-            
-            {|
-                Parameter     = "Version"
-                Value         = qsValueMap.[signedVersion]
-                FieldName     = signedVersion
-            |}
-            
-            {|
-                Parameter     = "Start time"
-                Value         = qsValueMap.[signedStart]
-                FieldName     = signedStart
-            |}
-            
-            {|
-                Parameter     = "Expiry time"
-                Value         = qsValueMap.[signedExpiry]
-                FieldName     = signedExpiry
-            |}
-            
-            {|
-                Parameter     = "Services"
-                Value         = qsValueMap.[signedServices]
-                FieldName     = signedServices
-            |}
-            
-            {|
-                Parameter     = "Resource"
-                Value         = qsValueMap.[signedResource]
-                FieldName     = signedResource
-            |}
-            
-            {|
-                Parameter     = "Permissions"
-                Value         = qsValueMap.[signedPermissions]
-                FieldName     = signedPermissions
-            |}
-            
-            {|
-                Parameter     = "Allowed IP"
-                Value         = qsValueMap.[signedIp]
-                FieldName     = signedIp
-            |}
-            
-            {|
-                Parameter     = "Protocol"
-                Value         = qsValueMap.[signedProtocol]
-                FieldName     = signedProtocol
-            |}
-            
-            {|
-                Parameter     = "Types"
-                Value         = qsValueMap.[signedResourceTypes]
-                FieldName     = signedResourceTypes
-            |}
-            
-            {|
-                Parameter     = "Signature"
-                Value         = qsValueMap.[signature]
-                FieldName     = signature
-            |}
-            
-//"Table name"           tableName
-//"From partition key"   "spk"
-//"From row key"         "srk"
-//"To partition key"     "epk"
-//"To row key"           "erk"
-//"Policy"               "si"
-//"Object ID"            signedObjectId
-//"Tenand ID"            signedTenantId
-//"Key start time"       "skt"
-//"Key expiry time"      signedKeyExpiryTime
-//"Key service"          signedKeyService
-//"AuthorizedObjectId"   "saoid"
-//"UnauthorizedObjectId" "suoid"
-//"Correlation ID"       "scid"
-//"Directory depth"      signedDirectoryDepth
-//"Cache-Control"        "rscc"
-//"Content-Disposition"  "rscd"
-//"Content-Encoding"     "rsce"
-//"Content-Language"     "rscl"
-//"Content-Type"         "rsct"
-        ])
-
-let private hmacSignature =
-    Ok "HMAC signature"
-
-let private yourUrl =
-    Ok "Your URL"
+    Option.map urlToRows |>
+    Option.defaultValue [ row "Type" (Error "Invalid URL") "URL" "" ]
 
 let parserCard model dispatch =
     let urlField =
         urlField model dispatch
-        
-    let rows =
-        getRowInfos model.Url |>
-        Option.map (fun sas -> sas |>
-                               List.choose (fun x -> match x.Value with
-                                                     | Some y -> Some {| FieldName = x.FieldName; Parameter = x.Parameter; Value = y |}
-                                                     | None   -> None) |>
-                               List.map(fun r -> row r.Parameter r.Value.Parsed r.FieldName r.Value.Source)) |>
-        Option.map ((List.filter ((<>)Html.none))) |>
-        Option.defaultValue [ row "Type" (Error "Invalid URL") "URL" "" ]
     
     let disclaimer title text =
-        if model.DisclaimerVisible then
-            disclaimer title text dispatch
-        else
-            Html.none
+        if   model.DisclaimerVisible
+        then disclaimer title text dispatch
+        else Html.none
     
     card [
         Html.form [
@@ -468,7 +460,7 @@ let parserCard model dispatch =
                     th "Value"
                 ]
                 Html.tableBody [
-                    yield! rows
+                    yield! rows model.Url
                 ]
             ]
         ]
