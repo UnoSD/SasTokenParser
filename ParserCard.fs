@@ -177,22 +177,36 @@ module private Result =
 
 type private SasType = Account | Service | User | Invalid
 
-let private signedResource       = "sr"
-let private signedVersion        = "sv"
-let private signedPermissions    = "sp"
-let private signedStart          = "st"
-let private signedExpiry         = "se"
-let private signedServices       = "ss"
-let private signedResourceTypes  = "srt"
-let private signedObjectId       = "skoid"
-let private signedTenantId       = "sktid"
-let private signedKeyExpiryTime  = "ske"
-let private signedKeyService     = "sks"
-let private signedDirectoryDepth = "sdd"  
-let private signedIp             = "sip"  
-let private signedProtocol       = "spr"  
-let private tableName            = "tn"
-let private signature            = "sig"
+let private signedResource             = "sr"
+let private signedVersion              = "sv"
+let private signedPermissions          = "sp"
+let private signedStart                = "st"
+let private signedExpiry               = "se"
+let private signedServices             = "ss"
+let private signedResourceTypes        = "srt"
+let private signedObjectId             = "skoid"
+let private signedTenantId             = "sktid"
+let private signedKeyExpiryTime        = "ske"
+let private signedKeyService           = "sks"
+let private signedDirectoryDepth       = "sdd"  
+let private signedIp                   = "sip"  
+let private signedProtocol             = "spr"  
+let private tableName                  = "tn"                                       
+let private startPk                    = "spk"
+let private startRk                    = "srk"
+let private endPk                      = "epk"
+let private endRk                      = "erk"
+let private signedIdentifier           = "si"
+let private signedKeyStartTime         = "skt"
+let private signedAuthorizedObjectId   = "saoid"
+let private signedUnauthorizedObjectId = "suoid"
+let private signedCorrelationId        = "scid"
+let private cacheControlResponse       = "rscc"
+let private contentDispositionResponse = "rscd"
+let private contentEncodingResponse    = "rsce"
+let private contentLanguageResponse    = "rscl"
+let private contentTypeResponse        = "rsct"
+let private signature                  = "sig"
 
 let private createOptionRowInfo parse opt =
     Option.map (fun x -> {| Parsed = parse x; Source = x |}) opt
@@ -271,23 +285,42 @@ let private getSasType (qsValueMap : Map<string, {| Parsed : Result<string, stri
     | true, false, true , false -> User
     | _                         -> Invalid      
 
+let private getGuid text =
+    match Guid.TryParse(text) with
+    | true, _ -> Ok text
+    | _       -> Error "Invalid GUID"
+
 let private queryStringValidators = [
-    signedVersion       , (sprintf "API version: %s" >> Ok)
-    signedPermissions   , getPermissionsExplanation
-    signedStart         , getReadableDateTime
-    signedExpiry        , getReadableDateTime
-    signedServices      , getServicesExplanation
-    signedResourceTypes , getResourceTypesExplanation
-    signedResource      , getResourcesExplanation
-    signedIp            , getIpExplanation
-    signedProtocol      , getProtocol
-    signedObjectId      , Ok
-    signedTenantId      , Ok
-    signedKeyExpiryTime , Ok
-    signedKeyService    , Ok
-    signedDirectoryDepth, Ok
-    tableName           , Ok
-    signature           , (fun _ -> Ok "HMAC signature")
+    signedVersion             , (sprintf "API version: %s" >> Ok)
+    signedPermissions         , getPermissionsExplanation
+    signedStart               , getReadableDateTime
+    signedExpiry              , getReadableDateTime
+    signedKeyExpiryTime       , getReadableDateTime
+    signedKeyStartTime        , getReadableDateTime
+    signedServices            , getServicesExplanation
+    signedResourceTypes       , getResourceTypesExplanation
+    signedResource            , getResourcesExplanation
+    signedIp                  , getIpExplanation
+    signedProtocol            , getProtocol
+    signedObjectId            , getGuid
+    signedTenantId            , getGuid
+    signedKeyService          , Ok
+    signedDirectoryDepth      , Ok
+    tableName                 , Ok
+    startPk                   , Ok
+    startRk                   , Ok
+    endPk                     , Ok
+    endRk                     , Ok
+    signedIdentifier          , Ok
+    signedAuthorizedObjectId  , Ok
+    signedUnauthorizedObjectId, Ok
+    signedCorrelationId       , Ok
+    cacheControlResponse      , Ok
+    contentDispositionResponse, Ok
+    contentEncodingResponse   , Ok
+    contentLanguageResponse   , Ok
+    contentTypeResponse       , Ok
+    signature                 , (fun _ -> Ok "HMAC signature")
 ]
 
 let private tryGetNonEmptyQueryStringValue query key =
@@ -424,31 +457,130 @@ let createRowInfos (url : Uri) =
         |}
         
         {|
+            Parameter     = "Object ID"
+            Value         = qsValueMap.[signedObjectId]
+            FieldName     = signedObjectId
+        |}
+        
+        {|
+            Parameter     = "Tenant ID"
+            Value         = qsValueMap.[signedTenantId]
+            FieldName     = signedTenantId
+        |}
+        
+        {|
+            Parameter     = "Table name"
+            Value         = qsValueMap.[tableName]
+            FieldName     = tableName
+        |}
+        
+        {|
+            Parameter     = "Key expiry time"
+            Value         = qsValueMap.[signedKeyExpiryTime]
+            FieldName     = signedKeyExpiryTime
+        |}
+        
+        {|
+            Parameter     = "Key service"
+            Value         = qsValueMap.[signedKeyService]
+            FieldName     = signedKeyService
+        |}
+        
+        {|
+            Parameter     = "Directory depth"
+            Value         = qsValueMap.[signedDirectoryDepth]
+            FieldName     = signedDirectoryDepth
+        |}
+
+        {|
+            Parameter     = "From partition key"
+            Value         = qsValueMap.[startPk]
+            FieldName     = startPk
+        |}
+
+        {|
+            Parameter     = "From row key"
+            Value         = qsValueMap.[startRk]
+            FieldName     = startRk
+        |}
+             
+        {|
+            Parameter     = "To partition key"
+            Value         = qsValueMap.[endPk]
+            FieldName     = endPk
+        |}
+              
+        {|
+            Parameter     = "To row key"
+            Value         = qsValueMap.[endRk]
+            FieldName     = endRk
+        |}
+        
+        {|
+            Parameter     = "Policy"
+            Value         = qsValueMap.[signedIdentifier]
+            FieldName     = signedIdentifier
+        |}
+        
+        {|
+            Parameter     = "Key start time"
+            Value         = qsValueMap.[signedKeyStartTime]
+            FieldName     = signedKeyStartTime
+        |}
+        
+        {|
+            Parameter     = "Authorized object ID"
+            Value         = qsValueMap.[signedAuthorizedObjectId]
+            FieldName     = signedAuthorizedObjectId
+        |}
+
+        {|
+            Parameter     = "Unauthorized object ID"
+            Value         = qsValueMap.[signedUnauthorizedObjectId]
+            FieldName     = signedUnauthorizedObjectId
+        |}
+
+        {|
+            Parameter     = "Correlation ID"
+            Value         = qsValueMap.[signedCorrelationId]
+            FieldName     = signedCorrelationId
+        |}
+
+        {|
+            Parameter     = "Cache-Control response header"
+            Value         = qsValueMap.[cacheControlResponse]
+            FieldName     = cacheControlResponse
+        |}
+        
+        {|
+            Parameter     = "Content-Disposition response header"
+            Value         = qsValueMap.[contentDispositionResponse]
+            FieldName     = contentDispositionResponse
+        |}
+        
+        {|
+            Parameter     = "Content-Encoding response header"
+            Value         = qsValueMap.[contentEncodingResponse]
+            FieldName     = contentEncodingResponse
+        |}
+        
+        {|
+            Parameter     = "Content-Language response header"
+            Value         = qsValueMap.[contentLanguageResponse]
+            FieldName     = contentLanguageResponse
+        |}
+        
+        {|
+            Parameter     = "Content-Type response header"
+            Value         = qsValueMap.[contentTypeResponse]
+            FieldName     = contentTypeResponse
+        |}
+         
+        {|
             Parameter     = "Signature"
             Value         = qsValueMap.[signature]
             FieldName     = signature
         |}
-        
-        //"Table name"           tableName
-        //"From partition key"   "spk"
-        //"From row key"         "srk"
-        //"To partition key"     "epk"
-        //"To row key"           "erk"
-        //"Policy"               "si"
-        //"Object ID"            signedObjectId
-        //"Tenand ID"            signedTenantId
-        //"Key start time"       "skt"
-        //"Key expiry time"      signedKeyExpiryTime
-        //"Key service"          signedKeyService
-        //"AuthorizedObjectId"   "saoid"
-        //"UnauthorizedObjectId" "suoid"
-        //"Correlation ID"       "scid"
-        //"Directory depth"      signedDirectoryDepth
-        //"Cache-Control"        "rscc"
-        //"Content-Disposition"  "rscd"
-        //"Content-Encoding"     "rsce"
-        //"Content-Language"     "rscl"
-        //"Content-Type"         "rsct"
     ]
 
 let private urlToRows url =
