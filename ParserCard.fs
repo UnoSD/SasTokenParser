@@ -168,6 +168,20 @@ let private parseHost (host : string) =
 
 type private SasType<'a> = | Account of 'a | Service of 'a | User of 'a | Invalid of 'a
 
+let private signedResource       = "sr"
+let private signedVersion        = "sv"
+let private signedPermissions    = "sp"
+let private signedExpiry         = "se"
+let private signedServices       = "ss"
+let private signedResourceTypes  = "srt"
+let private signedObjectId       = "skoid"
+let private signedTenantId       = "sktid"
+let private signedKeyExpiryTime  = "ske"
+let private signedKeyService     = "sks"
+let private signedDirectoryDepth = "sdd"  
+let private tableName            = "tn"
+let private signature            = "sig"
+
 let private parse url =
     tryParseUrl url |>
     Option.map (fun url -> (url, parseHost url.Host, getQueryStringMap url.Query.[1..])) |>
@@ -181,7 +195,7 @@ let private parse url =
             tryGetNonEmptyQueryStringValue key |>
             Option.map (fun value -> {| Source = value; Parsed = func value |})
         
-        let (*valuesMap*)_ =
+        let qsValueMap =
             [ "sv"   , (sprintf "API version: %s" >> Ok)
               "sp"   , getPermissionsExplanation
               "se"   , getReadableDateTime
@@ -194,54 +208,15 @@ let private parse url =
               "sks"  , Ok
               "sdd"  , Ok
               "tn"   , Ok
-              "sig"  , Ok ] |>
+              "sig"  , (fun _ -> Ok "HMAC signature") ] |>
             List.map (fun (key, parser) -> key, tryGetQueryStringValueAndBind key parser) |>
             Map.ofList
-        
-        let signedVersion =
-            tryGetQueryStringValueAndBind "sv"    (sprintf "API version: %s" >> Ok)
-        
-        let signedPermissions =
-            tryGetQueryStringValueAndBind "sp"    getPermissionsExplanation
-        
-        let signedExpiry =
-            tryGetQueryStringValueAndBind "se"    getReadableDateTime
-        
-        let signedServices =
-            tryGetQueryStringValueAndBind "ss"    getServicesExplanation
-                                                  
-        let signedResourceTypes =                 
-            tryGetQueryStringValueAndBind "srt"   getResourceTypesExplanation
-                                                  
-        let signedResource =                      
-            tryGetQueryStringValueAndBind "sr"    getResourcesExplanation
-        
-        let signedObjectId =
-            tryGetQueryStringValueAndBind "skoid" Ok
-
-        let signedTenantId =
-            tryGetQueryStringValueAndBind "sktid" Ok
-                
-        let signedKeyExpiryTime =
-            tryGetQueryStringValueAndBind "ske"   Ok
-            
-        let signedKeyService =
-            tryGetQueryStringValueAndBind "sks"   Ok
-
-        let signedDirectoryDepth =
-            tryGetQueryStringValueAndBind "sdd"   Ok
-        
-        let tableName =
-            tryGetQueryStringValueAndBind "tn"    Ok
-        
-        let signature =
-            tryGetNonEmptyQueryStringValue "sig"
-        
+                      
         let serviceDependantRequiredKeyForServiceSas =
             match hostInfo |> Option.map (fun x -> x.Service) with
             | Some "blob"
-            | Some "file"  -> signedResource |> Option.map (fun x -> x.Parsed) |> Option.defaultValue (Error "Missing signed resource")
-            | Some "table" -> tableName      |> Option.map (fun x -> x.Parsed) |> Option.defaultValue (Error "Missing table name")
+            | Some "file"  -> qsValueMap.["sr"] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue (Error "Missing signed resource")
+            | Some "table" -> qsValueMap.["tn"] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue (Error "Missing table name")
             | _            -> Ok ""
         
         let (|Parsed|_|) (record : {| Parsed : Result<string, string>; Source : string |}) =
@@ -250,12 +225,12 @@ let private parse url =
             | _    -> None
         
         let isSignedDirectoryDepthRequired =
-            match signedResource with
+            match qsValueMap.["sr"] with
             | Some (Parsed x) when x = "d" -> true
             | _                            -> false
         
         let isSignedDirectoryDepthPresent =
-            match signedDirectoryDepth with
+            match qsValueMap.["sdd"] with
             | Some (Parsed _) -> true
             | _               -> false
         
@@ -276,17 +251,17 @@ let private parse url =
         // required for service    sas: [sv se sig sp] sr (only blob/file) tn (only table) sdd (when sr=d)
         
         let isAccountSas =
-            [ signedResourceTypes
-              signedServices      ] |>
+            [ qsValueMap.["srt"]
+              qsValueMap.["ss"]   ] |>
             List.forall (function | Some (Parsed _) -> true | _ -> false) &&
             not <| Option.isSome containerName
         
         let isUserSas =
-            [ signedResource
-              signedObjectId
-              signedTenantId
-              signedKeyExpiryTime
-              signedKeyService    ] |>
+            [ qsValueMap.["sr"]
+              qsValueMap.["skoid"]
+              qsValueMap.["sktid"]
+              qsValueMap.["ske"]
+              qsValueMap.["sks"]    ] |>
             List.forall (function | Some (Parsed _) -> true | _ -> false) &&
             (isSignedDirectoryDepthRequired = isSignedDirectoryDepthPresent)
         
@@ -294,15 +269,15 @@ let private parse url =
             [ serviceDependantRequiredKeyForServiceSas ] |>
             List.forall (function | Ok _ -> true | _ -> false) &&
             (isSignedDirectoryDepthRequired = isSignedDirectoryDepthPresent) &&
-            (not <| isOk (signedResourceTypes |> Option.map (fun x -> x.Parsed) |> Option.defaultValue(Error ""))) &&
-            (not <| isOk (signedObjectId |> Option.map (fun x -> x.Parsed) |> Option.defaultValue(Error "")))
+            (not <| isOk (qsValueMap.["srt"] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue(Error ""))) &&
+            (not <| isOk (qsValueMap.["skoid"] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue(Error "")))
         
         let isValidSas =
-            [ signedVersion
-              signedExpiry
-              signedPermissions ] |>
+            [ qsValueMap.["sv"]
+              qsValueMap.["se"]
+              qsValueMap.["sp"] ] |>
             List.forall (function | Some (Parsed _) -> true | _ -> false) &&
-            Option.isSome signature
+            Option.isSome qsValueMap.["sig"]
         
         let (uniqueQsKeys, sasType) =
             match isValidSas, isAccountSas, isUserSas, isServiceSas with
@@ -358,7 +333,7 @@ let private parse url =
             
             {|
                 Parameter     = "Version"
-                Value         = signedVersion
+                Value         = qsValueMap.["sv"]
                 FieldName     = "sv"
             |}
             
@@ -370,25 +345,25 @@ let private parse url =
             
             {|
                 Parameter     = "Expiry time"
-                Value         = signedExpiry
+                Value         = qsValueMap.["se"]
                 FieldName     = "se"
             |}
             
             {|
                 Parameter     = "Services"
-                Value         = signedServices
+                Value         = qsValueMap.["ss"]
                 FieldName     = "ss"
             |}
             
             {|
                 Parameter     = "Resource"
-                Value         = signedResource
+                Value         = qsValueMap.["sr"]
                 FieldName     = "sr"
             |}
             
             {|
                 Parameter     = "Permissions"
-                Value         = signedPermissions
+                Value         = qsValueMap.["sp"]
                 FieldName     = "sp"
             |}
             
@@ -406,13 +381,13 @@ let private parse url =
             
             {|
                 Parameter     = "Types"
-                Value         = signedResourceTypes
+                Value         = qsValueMap.["srt"]
                 FieldName     = "srt"
             |}
             
             {|
                 Parameter     = "Signature"
-                Value         = signature |> Option.map (fun s -> {| Parsed = Ok "HMAC signature"; Source = s |})
+                Value         = qsValueMap.["sig"]
                 FieldName     = "sig"
             |}
             
