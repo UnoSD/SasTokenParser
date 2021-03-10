@@ -98,8 +98,11 @@ let private getContainerName (url : Uri) =
     | UrlSegments (x :: _) -> Some x
     | _                    -> None
     
-let private getCloud domain =
-    cloudMap |> Map.tryFind domain |> Option.defaultValue domain
+let private getCloudResult domain =
+    cloudMap |>
+    Map.tryFind domain |>
+    Option.map Ok |>
+    Option.defaultValue (Error <| sprintf "Unsupported domain %s" domain)
     
 let private getExplanationForCharacters value map =
     match value with
@@ -160,7 +163,7 @@ let private getProtocol =
 
 let private parseHost (host : string) =
     match host.Split('.') with
-    | [| account; service; "core"; cloud; "net" |] -> Some {| Account = account; Service = service; Cloud = cloud |}
+    | [| account; service; "core"; domain; "net" |] -> Some {| Account = account; Service = service; Domain = domain |}
     | _ ->                                            None
 
 type private SasType<'a> = | Account of 'a | Service of 'a | User of 'a | Invalid of 'a
@@ -301,16 +304,13 @@ let private parse url =
             List.forall (function | Some (Parsed _) -> true | _ -> false) &&
             Option.isSome signature
         
-        let sasType =
+        let (uniqueQsKeys, sasType) =
             match isValidSas, isAccountSas, isUserSas, isServiceSas with
-            | true, true , false, false -> Ok "Account SAS"
-            | true, false, false, true  -> Ok "Service SAS"        
-            | true, false, true , false -> Ok "User delegation SAS"
-            | _                         -> Error "Invalid SAS token"                   
+            | true, true , false, false -> "srt ss"                     , Ok "Account SAS"
+            | true, false, false, true  -> "sr/tn sdd"                  , Ok "Service SAS"        
+            | true, false, true , false -> "sr skoid sktid ske sks sdd" , Ok "User delegation SAS"
+            | _                         -> ""                           , Error "Invalid SAS token"                   
                 
-        let known (parsed, source) =
-            Some {| Parsed = parsed; Source = source |}
-            
         let getResult map =
             hostInfo |>
             Option.map (map >> Ok) |>
@@ -323,54 +323,53 @@ let private parse url =
             getResult (fun x -> x.Service)
         
         let domain =
-            getResult (fun x -> x.Cloud)
+            hostInfo |> Option.map (fun x -> x.Domain)
         
-        let cloud =
-            domain |>
-            Result.map getCloud
+        let createResultRowInfo parsed source =
+            Some {| Parsed = parsed; Source = source |}
         
-        let toOption =
-            function
-            | Ok value -> Some value
+        let createResultRowInfoNoSource parsed =
+            match parsed with
+            | Ok value -> createResultRowInfo parsed value
             | Error _  -> None
         
-        let cloud =
-            domain |> toOption |> Option.map (fun x -> {| Parsed = cloud; Source = x |})
+        let createOptionRowInfo parse opt =
+            Option.map (fun x -> {| Parsed = parse x; Source = x |}) opt
         
         [
             {|
                 Parameter     = "Type"
-                Value         = known (sasType, "URL")
+                Value         = createResultRowInfo sasType uniqueQsKeys
                 FieldName     = "URL and QS"
             |}
             
             {|
                 Parameter     = "Account"
-                Value         = known (account, "URL")
+                Value         = createResultRowInfoNoSource account
                 FieldName     = "//{account}."
             |}
             
             {|
                 Parameter     = "Service"
-                Value         = known (service, "URL")
+                Value         = createResultRowInfoNoSource service
                 FieldName     = ".{service}.core"
             |}
             
             {|
                 Parameter     = "Cloud"
-                Value         = cloud
+                Value         = createOptionRowInfo getCloudResult domain
                 FieldName     = "core.{cloud}.net"
             |}
             
             {|
                 Parameter     = "Container"
-                Value         = containerName |> Option.map (fun s -> {| Parsed = Ok s; Source = s |})
+                Value         = createOptionRowInfo Ok containerName
                 FieldName     = ".net/{container}/"
             |}
             
             {|
                 Parameter     = "Blob"
-                Value         = getBlobName url |> Option.map (fun s -> {| Parsed = Ok s; Source = s |})
+                Value         = getBlobName url |> createOptionRowInfo Ok
                 FieldName     = "{container}/{blob}"
             |}
             
@@ -474,7 +473,7 @@ let parserCard model dispatch =
                                                      | None   -> None) |>
                                List.map(fun r -> row r.Parameter r.Value.Parsed r.FieldName r.Value.Source)) |>
         Option.map ((List.filter ((<>)Html.none))) |>
-        Option.defaultValue [ row "Type" (Error "Invalid URL") "URL" "URL" ]
+        Option.defaultValue [ row "Type" (Error "Invalid URL") "URL" "" ]
     
     let disclaimer title text =
         if model.DisclaimerVisible then
