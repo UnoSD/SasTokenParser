@@ -166,10 +166,14 @@ let private parseHost (host : string) =
     | [| account; service; "core"; domain; "net" |] -> Some {| Account = account; Service = service; Domain = domain |}
     | _ ->                                            None
 
-let private isOk =
-    function
-    | Ok _    -> true
-    | Error _ -> false
+module private Result =
+    let isOk =
+        function
+        | Ok _    -> true
+        | Error _ -> false
+        
+    let isError res =
+        not <| isOk res
 
 type private SasType<'a> = | Account of 'a | Service of 'a | User of 'a | Invalid of 'a
 
@@ -190,6 +194,25 @@ let private signedProtocol       = "spr"
 let private tableName            = "tn"
 let private signature            = "sig"
 
+let private queryStringValidators = [
+    signedVersion       , (sprintf "API version: %s" >> Ok)
+    signedPermissions   , getPermissionsExplanation
+    signedStart         , getReadableDateTime
+    signedExpiry        , getReadableDateTime
+    signedServices      , getServicesExplanation
+    signedResourceTypes , getResourceTypesExplanation
+    signedResource      , getResourcesExplanation
+    signedIp            , getIpExplanation
+    signedProtocol      , getProtocol
+    signedObjectId      , Ok
+    signedTenantId      , Ok
+    signedKeyExpiryTime , Ok
+    signedKeyService    , Ok
+    signedDirectoryDepth, Ok
+    tableName           , Ok
+    signature           , (fun _ -> Ok "HMAC signature")
+]
+
 let createRowInfos (url : Uri) =
     let hostInfo =
         parseHost url.Host
@@ -207,31 +230,9 @@ let createRowInfos (url : Uri) =
         Option.map (fun value -> {| Source = value; Parsed = func value |})
     
     let qsValueMap =
-        [ signedVersion       , (sprintf "API version: %s" >> Ok)
-          signedPermissions   , getPermissionsExplanation
-          signedStart         , getReadableDateTime
-          signedExpiry        , getReadableDateTime
-          signedServices      , getServicesExplanation
-          signedResourceTypes , getResourceTypesExplanation
-          signedResource      , getResourcesExplanation
-          signedIp            , getIpExplanation
-          signedProtocol      , getProtocol
-          signedObjectId      , Ok
-          signedTenantId      , Ok
-          signedKeyExpiryTime , Ok
-          signedKeyService    , Ok
-          signedDirectoryDepth, Ok
-          tableName           , Ok
-          signature           , (fun _ -> Ok "HMAC signature") ] |>
+        queryStringValidators |>
         List.map (fun (key, parser) -> key, tryGetQueryStringValueAndBind key parser) |>
         Map.ofList
-                  
-    let serviceDependantRequiredKeyForServiceSas =
-        match hostInfo |> Option.map (fun x -> x.Service) with
-        | Some "blob"
-        | Some "file"  -> qsValueMap.[signedResource] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue (Error "Missing signed resource")
-        | Some "table" -> qsValueMap.[tableName] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue (Error "Missing table name")
-        | _            -> Ok ""
     
     let (|Parsed|_|) (record : {| Parsed : Result<string, string>; Source : string |}) =
         match record.Parsed with
@@ -259,12 +260,32 @@ let createRowInfos (url : Uri) =
     // required for delegation sas: [sv se sig sp] sr skoid sktid ske sks sdd (when sr=d)
     // required for service    sas: [sv se sig sp] sr (only blob/file) tn (only table) sdd (when sr=d)
     
+    let allValidInQueryString keys =
+        keys |>
+        List.map (fun x -> Map.find x qsValueMap) |>
+        List.forall (function | Some (Parsed _) -> true | _ -> false)
+    
+    let queryStringParsed key =
+        qsValueMap.[key] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue(Error "")
+    
+    let isMissingOrInvalid key =
+        Result.isError <| queryStringParsed key
+    
+    let isValid key =
+        not <| isMissingOrInvalid key
+    
+    let hadServiceSasRequiredKeys =
+        match hostInfo |> Option.map (fun x -> x.Service) with
+        | Some "blob"
+        | Some "file"  -> isValid signedResource
+        | Some "table" -> isValid tableName
+        | _            -> false
+    
     let isAccountSas =
         [ signedResourceTypes
           signedServices      ] |>
-        List.map (fun x -> Map.find x qsValueMap) |>
-        List.forall (function | Some (Parsed _) -> true | _ -> false) &&
-        not <| Option.isSome containerName
+        allValidInQueryString   &&
+        Option.isNone containerName
     
     let isUserSas =
         [ signedResource
@@ -272,23 +293,20 @@ let createRowInfos (url : Uri) =
           signedTenantId
           signedKeyExpiryTime
           signedKeyService    ] |>
-        List.map (fun x -> Map.find x qsValueMap) |>
-        List.forall (function | Some (Parsed _) -> true | _ -> false) &&
+        allValidInQueryString   &&
         (isSignedDirectoryDepthRequired = isSignedDirectoryDepthPresent)
     
     let isServiceSas =
-        [ serviceDependantRequiredKeyForServiceSas ] |>
-        List.forall (function | Ok _ -> true | _ -> false) &&
+        hadServiceSasRequiredKeys &&
         (isSignedDirectoryDepthRequired = isSignedDirectoryDepthPresent) &&
-        (not <| isOk (qsValueMap.[signedResourceTypes] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue(Error ""))) &&
-        (not <| isOk (qsValueMap.[signedObjectId] |> Option.map (fun x -> x.Parsed) |> Option.defaultValue(Error "")))
+        isMissingOrInvalid signedResourceTypes &&
+        isMissingOrInvalid signedObjectId
     
     let isValidSas =
         [ signedVersion
           signedExpiry
           signedPermissions ] |>
-        List.map (fun x -> Map.find x qsValueMap) |>
-        List.forall (function | Some (Parsed _) -> true | _ -> false) &&
+        List.forall isValid &&
         Option.isSome qsValueMap.[signature]
     
     let (uniqueQsKeys, sasType) =
@@ -425,7 +443,7 @@ let createRowInfos (url : Uri) =
         //"Content-Type"         "rsct"
     ]
 
-let urlToRows url =
+let private urlToRows url =
     createRowInfos url |>
     List.choose (fun x -> match x.Value with
                           | Some y -> Some <| row x.Parameter y.Parsed x.FieldName y.Source
