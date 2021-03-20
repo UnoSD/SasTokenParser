@@ -10,6 +10,7 @@
     <Compile Include="Messages.fs" />
     <Compile Include="Tabs.fs" />
     <Compile Include="Updates.fs" />
+    <Compile Include="Parser.fs" />
     <Compile Include="ParserCard.fs" />
     <Compile Include="About.fs" />
     <Compile Include="Page.fs" />
