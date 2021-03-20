@@ -11,7 +11,10 @@ let private str = UrlParser.str
 let private map = UrlParser.map
 
 let private cloudMap =
-    Map.empty.Add ("windows", "Azure public cloud")
+    Map.empty.Add("windows.net"      , "Azure public cloud")
+             .Add("usgovcloudapi.net", "Azure US government")
+             .Add("cloudapi.de"      , "Azure German")
+             .Add("chinacloudapi.cn" , "Azure China")
 
 let private getQueryStringMap (query : string) =
     query.Split('&') |> Array.map (fun kvp -> kvp.Split('=')) |> Array.map (function | [| key; value |] -> (key, Some value) | [| key |] -> (key, None) | _ -> failwith "Malformed query string") |> Map.ofArray
@@ -102,8 +105,12 @@ let private getProtocol =
 
 let private parseHost (host : string) =
     match host.Split('.') with
-    | [| account; service; "core"; domain; "net" |] -> Some {| Account = account; Service = service; Domain = domain |}
-    | _ ->                                            None
+    | [| account; service; "core"; domain; tld |]
+    | [| account; service; "core"; domain; tld |]
+    | [| account; service; "core"; domain; tld |] -> Some {| Account = account
+                                                             Service = service
+                                                             Domain  = domain + "." + tld |}
+    | _ ->                                           None
 
 module private Result =
     let isOk =
