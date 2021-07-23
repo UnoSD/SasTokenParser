@@ -59,13 +59,13 @@ let private getExplanationForCharacters value map =
 let private getPermissionsExplanation permissions =
     [ 'r', "r - Read"
       'w', "w - Write"
-      'd', "w - Delete"
-      'y', "w - Permanent delete" 
-      'l', "w - List"             
-      'a', "w - Add"              
-      'c', "w - Create"           
-      'u', "w - Update"           
-      'p', "w - Process"          ] |>
+      'd', "d - Delete"
+      'y', "y - Permanent delete" 
+      'l', "l - List"             
+      'a', "a - Add"              
+      'c', "c - Create"           
+      'u', "u - Update"           
+      'p', "p - Process"          ] |>
     getExplanationForCharacters permissions
     
 let private getServicesExplanation services =
